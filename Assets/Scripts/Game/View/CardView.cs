@@ -107,6 +107,13 @@ namespace MixVerse.Game.View
         {
             IsFaceUp = faceUp;
             transform.localRotation = GetLocalRotation();
+
+            // TMP の既定シェーダーは両面描画なので、裏向きのときは
+            // 回転だけに任せず明示的に消さないと文字が透けて見えてしまう。
+            if (_faceLabel != null)
+            {
+                _faceLabel.enabled = faceUp;
+            }
         }
 
         /// <summary>

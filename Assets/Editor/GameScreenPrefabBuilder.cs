@@ -68,17 +68,24 @@ namespace MixVerse.EditorTools
             var boxCollider = root.AddComponent<BoxCollider>();
             boxCollider.size = new Vector3(CardWidth, CardHeight, 0.05f);
 
-            // 表面はカードのローカル +Z 側、裏面は -Z 側を向くようにそろえる
+            // 表面はカードのローカル +Z 側、裏面は -Z 側。
             var face = CreateQuad("Face", root.transform, faceMaterial, true);
             face.transform.localScale = new Vector3(CardWidth, CardHeight, 1f);
+            face.transform.localPosition = new Vector3(0f, 0f, 0.001f);
 
             var back = CreateQuad("Back", root.transform, backMaterial, false);
             back.transform.localScale = new Vector3(CardWidth, CardHeight, 1f);
+            back.transform.localPosition = new Vector3(0f, 0f, -0.001f);
 
-            // 絵柄画像が入るまでのプレースホルダ。Face の localScale を継承しないようルート直下に置く
+            // 絵柄画像が入るまでのプレースホルダ。Face の localScale を継承しないようルート直下に置く。
+            //
+            // TextMeshPro はローカル -Z 側から読める向きに描画される。
+            // 表面は +Z 側にあるので、そのまま置くと読み手と反対を向いて文字が鏡像になる。
+            // Y 軸に 180 度回して、表面と同じ側から読めるようにする。
             var labelObject = new GameObject("Label");
             labelObject.transform.SetParent(root.transform, false);
             labelObject.transform.localPosition = new Vector3(0f, 0f, 0.01f);
+            labelObject.transform.localRotation = Quaternion.Euler(0f, 180f, 0f);
 
             var label = labelObject.AddComponent<TextMeshPro>();
             label.text = "AS";
@@ -351,10 +358,10 @@ namespace MixVerse.EditorTools
         // ------------------------------------------------------------------
 
         /// <summary>
-        /// Quad を作り、見える面が親のローカル +Z（faceForward が false なら -Z）を向くようにそろえる。
+        /// Quad を作り、見える面がローカル +Z（visibleAlongPositiveZ が false なら -Z）を向くようにそろえる。
         /// Unity の Quad の法線の向きに依存しないよう、実際のメッシュ法線を見て判定している。
         /// </summary>
-        private static GameObject CreateQuad(string name, Transform parent, Material material, bool faceForward)
+        private static GameObject CreateQuad(string name, Transform parent, Material material, bool visibleAlongPositiveZ)
         {
             var quad = GameObject.CreatePrimitive(PrimitiveType.Quad);
             quad.name = name;
@@ -372,7 +379,7 @@ namespace MixVerse.EditorTools
             var normal = normals != null && normals.Length > 0 ? normals[0] : Vector3.back;
 
             var pointsForward = Vector3.Dot(normal, Vector3.forward) > 0f;
-            var needsFlip = pointsForward != faceForward;
+            var needsFlip = pointsForward != visibleAlongPositiveZ;
 
             quad.transform.localRotation = needsFlip ? Quaternion.Euler(0f, 180f, 0f) : Quaternion.identity;
             quad.GetComponent<MeshRenderer>().sharedMaterial = material;
