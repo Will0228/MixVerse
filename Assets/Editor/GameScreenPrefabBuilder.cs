@@ -126,9 +126,19 @@ namespace MixVerse.EditorTools
             table.transform.localRotation = Quaternion.Euler(-90f, 0f, 0f) * table.transform.localRotation;
             table.transform.localScale = new Vector3(16f, 16f, 1f);
 
-            var playerHand = CreateHand("Hand_Player", board.transform, new Vector3(0f, 0.01f, -3.4f), 0f, true, 0.5f, 7.0f);
-            var cpu1Hand = CreateHand("Hand_Cpu1", board.transform, new Vector3(-3.7f, 0.01f, 1.9f), 120f, false, 0.35f, 4.5f);
-            var cpu2Hand = CreateHand("Hand_Cpu2", board.transform, new Vector3(3.7f, 0.01f, 1.9f), -120f, false, 0.35f, 4.5f);
+            // カードの姿勢は手札の Rotation で決める（CardView 側の傾きは 0）。
+            // y を持ち上げているのは、立てたカードの下端が盤面へめり込まないようにするため。
+            var playerHand = CreateHand(
+                "Hand_Player", board.transform,
+                new Vector3(0f, 0.45f, -3.4f), new Vector3(220f, 0f, 180f), true, 0.5f, 7.0f);
+
+            var cpu1Hand = CreateHand(
+                "Hand_Cpu1", board.transform,
+                new Vector3(-4.2f, 0.45f, 2.2f), new Vector3(-15f, -160f, 0f), false, 0.35f, 4.5f);
+
+            var cpu2Hand = CreateHand(
+                "Hand_Cpu2", board.transform,
+                new Vector3(4.2f, 0.45f, 2.2f), new Vector3(-15f, -200f, 0f), false, 0.35f, 4.5f);
 
             var discardPile = new GameObject("DiscardPile");
             discardPile.transform.SetParent(board.transform, false);
@@ -205,7 +215,7 @@ namespace MixVerse.EditorTools
             string name,
             Transform parent,
             Vector3 localPosition,
-            float yRotation,
+            Vector3 localEulerAngles,
             bool isFaceUp,
             float spacing,
             float maxWidth)
@@ -213,7 +223,7 @@ namespace MixVerse.EditorTools
             var handObject = new GameObject(name);
             handObject.transform.SetParent(parent, false);
             handObject.transform.localPosition = localPosition;
-            handObject.transform.localRotation = Quaternion.Euler(0f, yRotation, 0f);
+            handObject.transform.localRotation = Quaternion.Euler(localEulerAngles);
 
             var handView = handObject.AddComponent<HandView>();
 

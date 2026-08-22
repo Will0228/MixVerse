@@ -14,10 +14,9 @@ namespace MixVerse.Game.View
     /// </summary>
     public sealed class CardView : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler, IPointerClickHandler
     {
-        /// <summary>表向きのときのローカル回転。カメラから見て文字が正しい向きになるよう調整してある。</summary>
-        public static readonly Quaternion FaceUpRotation = Quaternion.Euler(-90f, 180f, 0f);
-
-        /// <summary>裏向きにするための追加回転。</summary>
+        /// <summary>
+        /// 裏向きにするための追加回転。カード自身の Y 軸まわりに 180 度ひっくり返す。
+        /// </summary>
         public static readonly Quaternion FaceDownFlip = Quaternion.Euler(0f, 180f, 0f);
 
         private static readonly int BaseMapPropertyId = Shader.PropertyToID("_BaseMap");
@@ -26,6 +25,11 @@ namespace MixVerse.Game.View
         [SerializeField] private MeshRenderer _backRenderer;
         [SerializeField] private TextMeshPro _faceLabel;
         [SerializeField] private BoxCollider _collider;
+
+        [Header("Pose")]
+        // カードの姿勢は手札（HandView）側の Rotation で決めるため、既定では傾けない。
+        // 手札の向きとは別に、カード単体をさらに倒したいときだけ使う。
+        [SerializeField] private float _faceUpTiltAngle;
 
         [Header("Draw Animation")]
         [SerializeField] private float _liftHeight = 0.8f;
@@ -59,7 +63,7 @@ namespace MixVerse.Game.View
         public bool IsFaceUp { get; private set; }
 
         /// <summary>カードの上端あたりのワールド座標。矢印 UI の表示位置に使う。</summary>
-        public Vector3 IndicatorWorldPosition => transform.position + Vector3.up * 0.35f;
+        public Vector3 IndicatorWorldPosition => transform.position + Vector3.up * 0.6f;
 
         /// <summary>
         /// このカードが表す内容を設定する。
@@ -119,7 +123,11 @@ namespace MixVerse.Game.View
         /// <summary>
         /// 現在の表裏に応じたローカル回転。
         /// </summary>
-        public Quaternion GetLocalRotation() => IsFaceUp ? FaceUpRotation : FaceUpRotation * FaceDownFlip;
+        public Quaternion GetLocalRotation()
+        {
+            var faceUpRotation = Quaternion.Euler(_faceUpTiltAngle, 0f, 0f);
+            return IsFaceUp ? faceUpRotation : faceUpRotation * FaceDownFlip;
+        }
 
         /// <summary>
         /// クリック判定の有効・無効。上がったプレイヤーのカードなどで使う。

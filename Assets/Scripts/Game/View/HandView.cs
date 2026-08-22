@@ -139,8 +139,9 @@ namespace MixVerse.Game.View
 
             var x = (-fullWidth * 0.5f) + (spacing * index);
 
-            // 重なり順が安定するよう、右のカードほどわずかに手前に置く
-            return new Vector3(x, _depthStep * index, 0f);
+            // 重なり順が安定するよう、後ろのカードほどわずかに手前へ出す。
+            // 手札の Rotation により表面はローカル +Z を向くので、+Z 側がカメラに近い。
+            return new Vector3(x, 0f, _depthStep * index);
         }
     }
 }
