@@ -36,11 +36,19 @@ namespace MixVerse.Game.View
         [SerializeField] private float _liftDuration = 0.15f;
         [SerializeField] private float _moveDuration = 0.35f;
 
+        [Header("Discard Toss")]
+        [SerializeField] private float _tossDuration = 0.45f;
+        [SerializeField] private float _tossArcHeight = 1.2f;
+        // 飛行中に加える傾きの最大量（度）。0 で余分な回転なし。
+        // 開始時と着地時は必ず 0 に戻るので、任意の値を入れても向きはずれない。
+        [SerializeField] private float _tossSpinDegrees;
+
         private readonly Subject<CardView> _onPointerEntered = new Subject<CardView>();
         private readonly Subject<CardView> _onPointerExited = new Subject<CardView>();
         private readonly Subject<CardView> _onClicked = new Subject<CardView>();
 
         private MaterialPropertyBlock _facePropertyBlock;
+        private Vector3? _faceLocalDirection;
 
         /// <summary>カーソルが乗った。矢印 UI の表示に使う。</summary>
         public Observable<CardView> OnPointerEntered => _onPointerEntered;
@@ -64,6 +72,40 @@ namespace MixVerse.Game.View
 
         /// <summary>カードの上端あたりのワールド座標。矢印 UI の表示位置に使う。</summary>
         public Vector3 IndicatorWorldPosition => transform.position + Vector3.up * 0.6f;
+
+        /// <summary>
+        /// 表面が向いているカードローカル方向。
+        ///
+        /// 表が +Z 側か -Z 側かは Prefab の組み方次第で、Unity の Quad の法線の向きにも依存する。
+        /// 決め打ちすると Prefab を作り直したときに裏返るので、実際のメッシュ法線から求める。
+        /// </summary>
+        public Vector3 FaceLocalDirection
+        {
+            get
+            {
+                if (_faceLocalDirection.HasValue)
+                {
+                    return _faceLocalDirection.Value;
+                }
+
+                var direction = Vector3.forward;
+
+                if (_faceRenderer != null)
+                {
+                    var meshFilter = _faceRenderer.GetComponent<MeshFilter>();
+                    var mesh = meshFilter != null ? meshFilter.sharedMesh : null;
+                    var normals = mesh != null ? mesh.normals : null;
+
+                    if (normals != null && normals.Length > 0)
+                    {
+                        direction = _faceRenderer.transform.localRotation * normals[0];
+                    }
+                }
+
+                _faceLocalDirection = direction.normalized;
+                return _faceLocalDirection.Value;
+            }
+        }
 
         /// <summary>
         /// このカードが表す内容を設定する。
@@ -105,12 +147,22 @@ namespace MixVerse.Game.View
         }
 
         /// <summary>
-        /// 表裏を切り替える。回転はローカル回転で表現する。
+        /// 表裏を切り替え、手札としての姿勢に合わせて回転もそろえる。
         /// </summary>
         public void SetFaceUp(bool faceUp)
         {
-            IsFaceUp = faceUp;
+            SetFaceUpVisibility(faceUp);
             transform.localRotation = GetLocalRotation();
+        }
+
+        /// <summary>
+        /// 回転はそのままに、表裏の状態とラベルの表示だけ切り替える。
+        /// 捨て札のように手札とは別の向きで置く場合、
+        /// SetFaceUp だと回転が手札の姿勢へ引き戻されてしまうのでこちらを使う。
+        /// </summary>
+        public void SetFaceUpVisibility(bool faceUp)
+        {
+            IsFaceUp = faceUp;
 
             // TMP の既定シェーダーは両面描画なので、裏向きのときは
             // 回転だけに任せず明示的に消さないと文字が透けて見えてしまう。
@@ -152,10 +204,13 @@ namespace MixVerse.Game.View
         }
 
         /// <summary>
-        /// 捨て札置き場へ飛ばす演出。
+        /// 捨て札置き場へ放り投げる演出。弧を描きながら回転して落ちる。
+        /// 呼び出し前に捨て札置き場の子にしておくこと（ローカル座標で動かす）。
         /// </summary>
-        public UniTask PlayDiscardAsync(Vector3 destination, CancellationToken token)
-            => TweenUtility.MoveAsync(transform, destination, _moveDuration, token);
+        public UniTask PlayDiscardAsync(Vector3 localPosition, Quaternion localRotation, CancellationToken token)
+            => TweenUtility.TossLocalAsync(
+                transform, localPosition, localRotation,
+                _tossArcHeight, _tossSpinDegrees, _tossDuration, token);
 
         public void OnPointerEnter(PointerEventData eventData)
         {

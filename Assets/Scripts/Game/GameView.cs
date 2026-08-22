@@ -29,6 +29,12 @@ namespace MixVerse.Game
         [SerializeField] private TextMeshProUGUI _turnLabel;
         [SerializeField] private TextMeshProUGUI _resultLabel;
 
+        [Header("Discard Pile")]
+        // そろったカードは盤面中央に残す。きれいに重ねると不自然なので位置と向きを散らす。
+        [SerializeField] private float _discardScatterRadius = 0.35f;
+        [SerializeField] private float _discardStackHeight = 0.006f;
+        [SerializeField] private float _discardTiltJitter = 8f;
+
         [Header("Timing")]
         [SerializeField] private float _fadeDuration = 0.6f;
         [SerializeField] private float _dealInterval = 0.02f;
@@ -37,6 +43,9 @@ namespace MixVerse.Game
         private readonly Subject<CardView> _onCardClicked = new Subject<CardView>();
         private readonly CompositeDisposable _cardSubscriptions = new CompositeDisposable();
         private readonly List<CardView> _spawnedCards = new List<CardView>();
+
+        /// <summary>捨て札置き場に積まれた枚数。積み上げる高さの計算に使う。</summary>
+        private int _discardStackCount;
 
         /// <summary>引く対象のカードがクリックされた。</summary>
         public Observable<CardView> OnCardClicked => _onCardClicked;
@@ -127,28 +136,33 @@ namespace MixVerse.Game
                 }
 
                 handView.Remove(cardView);
-                cardView.transform.SetParent(transform, true);
                 targets.Add(cardView);
             }
 
-            var destination = _discardPile != null ? _discardPile.position : Vector3.zero;
+            var pileParent = _discardPile != null ? _discardPile : transform;
             var moves = new List<UniTask>(targets.Count);
 
             foreach (var cardView in targets)
             {
-                cardView.SetFaceUp(true);
+                // SetFaceUp だと回転が手札の姿勢へ戻ってしまうので、表示だけ切り替える
+                cardView.SetFaceUpVisibility(true);
                 cardView.SetRaycastEnabled(false);
-                moves.Add(cardView.PlayDiscardAsync(destination, token));
+                cardView.IsSelectable = false;
+
+                // ローカル座標で動かすため、先に捨て札置き場の子にする（見た目の位置は維持）
+                cardView.transform.SetParent(pileParent, true);
+
+                moves.Add(cardView.PlayDiscardAsync(
+                    GetDiscardLocalPosition(_discardStackCount),
+                    GetDiscardLocalRotation(cardView),
+                    token));
+
+                _discardStackCount++;
             }
 
             await UniTask.WhenAll(moves);
 
-            foreach (var cardView in targets)
-            {
-                _spawnedCards.Remove(cardView);
-                Destroy(cardView.gameObject);
-            }
-
+            // 破棄せずそのまま盤面に残す。次の対局開始時に ClearCards でまとめて片付ける。
             await handView.ArrangeAsync(_arrangeDuration, token);
         }
 
@@ -239,6 +253,35 @@ namespace MixVerse.Game
 
         public UniTask WaitAsync(float seconds, CancellationToken token) => TweenUtility.WaitAsync(seconds, token);
 
+        /// <summary>
+        /// 捨て札置き場での位置。中心から少しずらしつつ、積むほど高くする。
+        /// 見た目だけの乱数なので、Model 側の seed 付き乱数とは分けて UnityEngine.Random を使う。
+        /// </summary>
+        private Vector3 GetDiscardLocalPosition(int stackIndex)
+        {
+            var offset = Random.insideUnitCircle * _discardScatterRadius;
+            return new Vector3(offset.x, stackIndex * _discardStackHeight, offset.y);
+        }
+
+        /// <summary>
+        /// 捨て札置き場での向き。柄が見えるよう表を真上に向けたうえで、向きと傾きを散らす。
+        /// </summary>
+        private Quaternion GetDiscardLocalRotation(CardView cardView)
+        {
+            // 表が +Z 側か -Z 側かは Prefab の組み方で変わるため、
+            // 角度を決め打ちせず、実測した表面の向きを真上へ合わせる回転を求める。
+            var facing = Quaternion.FromToRotation(cardView.FaceLocalDirection, Vector3.up);
+
+            var tilt = Quaternion.Euler(
+                Random.Range(-_discardTiltJitter, _discardTiltJitter),
+                0f,
+                Random.Range(-_discardTiltJitter, _discardTiltJitter));
+
+            var spin = Quaternion.Euler(0f, Random.Range(0f, 360f), 0f);
+
+            return spin * tilt * facing;
+        }
+
         private CardView CreateCard(Card card)
         {
             var cardView = Instantiate(_cardPrefab, transform);
@@ -272,6 +315,7 @@ namespace MixVerse.Game
         private void ClearCards()
         {
             _cardSubscriptions.Clear();
+            _discardStackCount = 0;
 
             foreach (var cardView in _spawnedCards)
             {
