@@ -1,6 +1,7 @@
 using System.Threading;
 using Cysharp.Threading.Tasks;
 using MixVerse.Game.Model;
+using MixVerse.Midi;
 using R3;
 using VContainer;
 using Random = System.Random;
@@ -20,18 +21,23 @@ namespace MixVerse.Game
         private const float CpuShowSelectionDuration = 0.5f;
         private const float TurnIntervalDuration = 0.2f;
 
+        /// <summary>SYNC で確定したことを表す番兵。手札インデックスと区別するため負値にする。</summary>
+        private const int CursorConfirmed = -1;
+
         private readonly GameView _view;
         private readonly OldMaidGame _game;
         private readonly CpuStrategy _cpuStrategy;
+        private readonly DjControllerInput _djController;
 
         private Random _random;
 
         [Inject]
-        public GamePresenter(GameView view, OldMaidGame game, CpuStrategy cpuStrategy)
+        public GamePresenter(GameView view, OldMaidGame game, CpuStrategy cpuStrategy, DjControllerInput djController)
         {
             _view = view;
             _game = game;
             _cpuStrategy = cpuStrategy;
+            _djController = djController;
         }
 
         public bool IsGameOver => _game.IsGameOver;
@@ -105,6 +111,51 @@ namespace MixVerse.Game
         /// </summary>
         private async UniTask<int> WaitForHumanSelectionAsync(int targetIndex, CancellationToken token)
         {
+            // DJ コントローラーが無い環境ではマウスだけで遊べるようにしておく
+            if (_djController == null)
+            {
+                return await WaitForMouseOnlySelectionAsync(targetIndex, token);
+            }
+
+            // ① SYNC が押されるまでは手札選択状態に入らない
+            _view.ClearSelectable();
+            _view.HideArrow();
+            _view.SetTurnText("Your turn - press SYNC to start selecting");
+
+            await _djController.OnSyncPressed.FirstAsync(token);
+
+            // ② ここから手札選択状態。ジョグを回すたびにカーソルが左右へ動く
+            var cardCount = _game.Hands[targetIndex].Count;
+            var cursor = 0;
+
+            _view.SetSelectableHand(targetIndex);
+            _view.ShowArrowAt(targetIndex, cursor);
+            _view.SetTurnText("Turn the jog to move - press SYNC to draw from " + GetPlayerName(targetIndex));
+
+            using (_djController.OnJogStep.Subscribe(step =>
+                   {
+                       cursor = WrapIndex(cursor + step, cardCount);
+                       _view.ShowArrowAt(targetIndex, cursor);
+                   }))
+            {
+                // SYNC をもう一度押すとカーソル位置で確定。マウスクリックでも確定できる。
+                var selectedIndex = await Observable.Merge(
+                        _djController.OnSyncPressed.Select(_ => CursorConfirmed),
+                        _view.OnCardClicked.Select(card => card.HandIndex))
+                    .FirstAsync(token);
+
+                _view.ClearSelectable();
+                _view.HideArrow();
+
+                return selectedIndex == CursorConfirmed ? cursor : selectedIndex;
+            }
+        }
+
+        /// <summary>
+        /// DJ コントローラーが接続されていない場合の従来どおりの選択。
+        /// </summary>
+        private async UniTask<int> WaitForMouseOnlySelectionAsync(int targetIndex, CancellationToken token)
+        {
             _view.SetTurnText("Your turn - pick a card from " + GetPlayerName(targetIndex));
             _view.SetSelectableHand(targetIndex);
 
@@ -114,6 +165,19 @@ namespace MixVerse.Game
             _view.HideArrow();
 
             return selected.HandIndex;
+        }
+
+        /// <summary>
+        /// カーソルを手札の端で反対側へ回り込ませる。
+        /// </summary>
+        private static int WrapIndex(int index, int count)
+        {
+            if (count <= 0)
+            {
+                return 0;
+            }
+
+            return ((index % count) + count) % count;
         }
 
         /// <summary>

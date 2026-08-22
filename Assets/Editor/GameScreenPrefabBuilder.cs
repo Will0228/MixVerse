@@ -1,6 +1,7 @@
 using System.IO;
 using MixVerse.Game;
 using MixVerse.Game.View;
+using MixVerse.Midi;
 using TMPro;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -292,6 +293,8 @@ namespace MixVerse.EditorTools
 
             instance.SetActive(false);
 
+            var djControllerInput = EnsureDjControllerInput();
+
             var lifetimeScope = Object.FindFirstObjectByType<UndisposableLifetimeScope>();
             if (lifetimeScope == null)
             {
@@ -301,10 +304,27 @@ namespace MixVerse.EditorTools
             {
                 var serializedScope = new SerializedObject(lifetimeScope);
                 serializedScope.FindProperty("_gameView").objectReferenceValue = gameView;
+                serializedScope.FindProperty("_djControllerInput").objectReferenceValue = djControllerInput;
                 serializedScope.ApplyModifiedPropertiesWithoutUndo();
             }
 
             EditorSceneManager.MarkSceneDirty(scene);
+        }
+
+        /// <summary>
+        /// DJ コントローラー入力用のオブジェクトをシーンに用意する。
+        /// GameScreen は非アクティブ開始なので、常時有効な独立したオブジェクトに置く。
+        /// </summary>
+        private static DjControllerInput EnsureDjControllerInput()
+        {
+            var existing = Object.FindFirstObjectByType<DjControllerInput>(FindObjectsInactive.Include);
+            if (existing != null)
+            {
+                return existing;
+            }
+
+            var inputObject = new GameObject("DjControllerInput");
+            return inputObject.AddComponent<DjControllerInput>();
         }
 
         private static void SetUpCamera()
