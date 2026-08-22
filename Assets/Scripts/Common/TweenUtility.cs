@@ -67,6 +67,56 @@ namespace MixVerse
         }
 
         /// <summary>
+        /// 放り投げるようにローカル座標で移動させる。
+        /// 弧を描きながら回転し、着地時にちょうど指定の位置・向きへ収まる。
+        /// </summary>
+        /// <param name="arcHeight">飛行中の最大の高さ。</param>
+        /// <param name="spinDegrees">
+        /// 飛行中に余分に加える回転の最大量（度）。飛行の中間で最大になり、
+        /// 開始時と着地時はどちらも 0 に戻るため、任意の値を入れても向きがずれない。
+        /// 0 なら余分な回転なし。
+        /// </param>
+        public static async UniTask TossLocalAsync(
+            Transform target,
+            Vector3 toLocalPosition,
+            Quaternion toLocalRotation,
+            float arcHeight,
+            float spinDegrees,
+            float duration,
+            CancellationToken token)
+        {
+            if (target == null)
+            {
+                return;
+            }
+
+            var fromPosition = target.localPosition;
+            var fromRotation = target.localRotation;
+
+            await RunAsync(duration, token, t =>
+            {
+                // 放られたものは初速が速く、落ちるにつれて水平方向の勢いが落ちる。
+                // 左右対称の SmoothStep ではなく、減速のみのイージングにする。
+                var eased = 1f - ((1f - t) * (1f - t));
+
+                // 放物線。t = 0.5 で最も高くなる
+                var arc = arcHeight * 4f * t * (1f - t);
+
+                target.localPosition =
+                    Vector3.LerpUnclamped(fromPosition, toLocalPosition, eased) + (Vector3.up * arc);
+
+                // 飛行中だけ少し傾ける。sin なので開始と着地では 0 に戻り、向きがずれない。
+                // 軸を X にしているのは、面の法線まわり（Z）に回すと
+                // 板が高速に回転しているように見えて不自然だったため。
+                var wobble = Quaternion.Euler(spinDegrees * Mathf.Sin(t * Mathf.PI), 0f, 0f);
+                target.localRotation = Quaternion.SlerpUnclamped(fromRotation, toLocalRotation, eased) * wobble;
+            });
+
+            target.localPosition = toLocalPosition;
+            target.localRotation = toLocalRotation;
+        }
+
+        /// <summary>
         /// CanvasGroup のアルファをフェードさせる。
         /// </summary>
         public static async UniTask FadeAsync(
