@@ -21,14 +21,24 @@ namespace MixVerse.EditorTools
         private const string PrefabFolder = "Assets/Prefabs";
         private const string MaterialFolder = "Assets/Materials";
         private const string TextureFolder = "Assets/Textures";
+        private const string DataFolder = "Assets/Data";
 
         private const string CardPrefabPath = PrefabFolder + "/Card.prefab";
         private const string GameScreenPrefabPath = PrefabFolder + "/GameScreen.prefab";
         private const string ArrowSpritePath = TextureFolder + "/SelectionArrow.png";
+        private const string DrawCameraSettingsPath = DataFolder + "/DrawCameraSettings.asset";
+
+        // CUE ボタンで呼び出す拍手する手（SimpleHands アセット付属）
+        private const string WhiteHandPrefabPath = "Assets/SimpleHands/Prefabs/WhiteHand.prefab";
+        private const string BlackHandPrefabPath = "Assets/SimpleHands/Prefabs/BlackHand.prefab";
 
         // カードの見た目のサイズ（トランプの縦横比に近づけている）
         private const float CardWidth = 0.7f;
         private const float CardHeight = 1.0f;
+
+        // ゲーム開始時のカメラの位置・向き。SetUpCamera() で Camera.main に適用する値と合わせること。
+        private static readonly Vector3 DefaultCameraPosition = new Vector3(0f, 7f, -6.5f);
+        private static readonly Vector3 DefaultCameraEulerAngles = new Vector3(48f, 0f, 0f);
 
         [MenuItem("MixVerse/Setup/Create Game Prefabs")]
         public static void CreateGamePrefabs()
@@ -36,15 +46,17 @@ namespace MixVerse.EditorTools
             EnsureFolder(PrefabFolder);
             EnsureFolder(MaterialFolder);
             EnsureFolder(TextureFolder);
+            EnsureFolder(DataFolder);
 
             var faceMaterial = CreateUnlitMaterial(MaterialFolder + "/CardFaceMaterial.mat", new Color(0.96f, 0.96f, 0.96f));
             var backMaterial = CreateUnlitMaterial(MaterialFolder + "/CardBackMaterial.mat", new Color(0.15f, 0.20f, 0.45f));
             var tableMaterial = CreateUnlitMaterial(MaterialFolder + "/TableMaterial.mat", new Color(0.09f, 0.32f, 0.20f));
 
             var arrowSprite = CreateArrowSprite(ArrowSpritePath);
+            var drawCameraSettings = CreateOrLoadDrawCameraSettings(DrawCameraSettingsPath);
 
             var cardPrefab = BuildCardPrefab(faceMaterial, backMaterial);
-            var gameScreenPrefab = BuildGameScreenPrefab(cardPrefab, tableMaterial, arrowSprite);
+            var gameScreenPrefab = BuildGameScreenPrefab(cardPrefab, tableMaterial, arrowSprite, drawCameraSettings);
 
             PlaceIntoScene(gameScreenPrefab);
             SetUpCamera();
@@ -112,7 +124,8 @@ namespace MixVerse.EditorTools
         // GameScreen.prefab
         // ------------------------------------------------------------------
 
-        private static GameObject BuildGameScreenPrefab(CardView cardPrefab, Material tableMaterial, Sprite arrowSprite)
+        private static GameObject BuildGameScreenPrefab(
+            CardView cardPrefab, Material tableMaterial, Sprite arrowSprite, DrawCameraSettings drawCameraSettings)
         {
             var root = new GameObject("GameScreen");
             var gameView = root.AddComponent<GameView>();
@@ -132,17 +145,28 @@ namespace MixVerse.EditorTools
                 "Hand_Player", board.transform,
                 new Vector3(0f, 0.45f, -3.4f), new Vector3(220f, 0f, 180f), true, 0.5f, 7.0f);
 
+            // ドロー演出用のカメラ位置・手札の向きは仮値。Scene 上で見た目を確認しながら調整すること。
             var cpu1Hand = CreateHand(
                 "Hand_Cpu1", board.transform,
-                new Vector3(-4.2f, 0.45f, 2.2f), new Vector3(-15f, -160f, 0f), false, 0.35f, 4.5f);
+                new Vector3(-4.2f, 0.45f, 2.2f), new Vector3(-15f, -160f, 0f), false, 0.35f, 4.5f,
+                new Vector3(-2.4f, 3.0f, -0.6f), new Vector3(35f, -55f, 0f), new Vector3(-15f, 20f, 0f));
 
             var cpu2Hand = CreateHand(
                 "Hand_Cpu2", board.transform,
-                new Vector3(4.2f, 0.45f, 2.2f), new Vector3(-15f, -200f, 0f), false, 0.35f, 4.5f);
+                new Vector3(4.2f, 0.45f, 2.2f), new Vector3(-15f, -200f, 0f), false, 0.35f, 4.5f,
+                new Vector3(2.4f, 3.0f, -0.6f), new Vector3(35f, 55f, 0f), new Vector3(-15f, -20f, 0f));
 
             var discardPile = new GameObject("DiscardPile");
             discardPile.transform.SetParent(board.transform, false);
             discardPile.transform.localPosition = new Vector3(0f, 0.02f, 0f);
+
+            var clapHandsView = CreateClapHands(board.transform);
+
+            // カードを引く前にカメラを戻す先。ゲーム開始時のカメラ位置と同じ値にしておく
+            var defaultCameraPoint = new GameObject("DefaultCameraPoint");
+            defaultCameraPoint.transform.SetParent(root.transform, false);
+            defaultCameraPoint.transform.position = DefaultCameraPosition;
+            defaultCameraPoint.transform.rotation = Quaternion.Euler(DefaultCameraEulerAngles);
 
             // ---- HUD ----
             var hud = new GameObject("Hud", typeof(RectTransform));
@@ -196,6 +220,9 @@ namespace MixVerse.EditorTools
             serializedView.FindProperty("_selectionArrow").objectReferenceValue = selectionArrow;
             serializedView.FindProperty("_turnLabel").objectReferenceValue = turnLabel;
             serializedView.FindProperty("_resultLabel").objectReferenceValue = resultLabel;
+            serializedView.FindProperty("_drawCameraSettings").objectReferenceValue = drawCameraSettings;
+            serializedView.FindProperty("_defaultCameraPoint").objectReferenceValue = defaultCameraPoint.transform;
+            serializedView.FindProperty("_clapHandsView").objectReferenceValue = clapHandsView;
 
             var handsProperty = serializedView.FindProperty("_handViews");
             handsProperty.arraySize = 3;
@@ -218,7 +245,10 @@ namespace MixVerse.EditorTools
             Vector3 localEulerAngles,
             bool isFaceUp,
             float spacing,
-            float maxWidth)
+            float maxWidth,
+            Vector3? drawCameraLocalPosition = null,
+            Vector3? drawCameraLocalEulerAngles = null,
+            Vector3? drawFacingEulerAngles = null)
         {
             var handObject = new GameObject(name);
             handObject.transform.SetParent(parent, false);
@@ -231,9 +261,91 @@ namespace MixVerse.EditorTools
             serialized.FindProperty("_isFaceUp").boolValue = isFaceUp;
             serialized.FindProperty("_cardSpacing").floatValue = spacing;
             serialized.FindProperty("_maxWidth").floatValue = maxWidth;
+
+            // カード引き演出用のカメラ位置は、手札自身の向き変更に巻き込まれないよう
+            // 手札の子ではなく同じ親（Board）の兄弟として置く。
+            if (drawCameraLocalPosition.HasValue)
+            {
+                var drawCameraPoint = new GameObject(name + "_DrawCameraPoint");
+                drawCameraPoint.transform.SetParent(parent, false);
+                drawCameraPoint.transform.localPosition = drawCameraLocalPosition.Value;
+                drawCameraPoint.transform.localRotation = Quaternion.Euler(drawCameraLocalEulerAngles ?? Vector3.zero);
+
+                serialized.FindProperty("_drawCameraPoint").objectReferenceValue = drawCameraPoint.transform;
+                serialized.FindProperty("_drawFacingEuler").vector3Value = drawFacingEulerAngles ?? Vector3.zero;
+            }
+
             serialized.ApplyModifiedPropertiesWithoutUndo();
 
             return handView;
+        }
+
+        /// <summary>
+        /// CUE ボタンで呼び出す拍手する両手を作る。
+        /// 位置・向き・叩き合わせる距離はすべて仮値。Scene 上で見た目を確認しながら調整すること。
+        /// </summary>
+        private static ClapHandsView CreateClapHands(Transform parent)
+        {
+            var whiteHandPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(WhiteHandPrefabPath);
+            var blackHandPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(BlackHandPrefabPath);
+
+            var root = new GameObject("ClapHands");
+            root.transform.SetParent(parent, false);
+            // カメラ手前・プレイヤー手札の奥、盤面から少し浮かせた位置
+            root.transform.localPosition = new Vector3(0f, 2.4f, -1.6f);
+
+            var clapHandsView = root.AddComponent<ClapHandsView>();
+
+            var leftHome = new Vector3(-0.55f, 0f, 0f);
+            var rightHome = new Vector3(0.55f, 0f, 0f);
+            var closedInset = new Vector3(0.35f, 0f, 0f);
+
+            var leftHand = InstantiateHand(whiteHandPrefab, root.transform, "LeftHand", leftHome, new Vector3(0f, 90f, 0f));
+            var rightHand = InstantiateHand(blackHandPrefab, root.transform, "RightHand", rightHome, new Vector3(0f, -90f, 0f));
+
+            var serialized = new SerializedObject(clapHandsView);
+            serialized.FindProperty("_leftHand").objectReferenceValue = leftHand;
+            serialized.FindProperty("_rightHand").objectReferenceValue = rightHand;
+            serialized.FindProperty("_leftHomeLocalPosition").vector3Value = leftHome;
+            serialized.FindProperty("_rightHomeLocalPosition").vector3Value = rightHome;
+            serialized.FindProperty("_leftClosedLocalPosition").vector3Value = leftHome + closedInset;
+            serialized.FindProperty("_rightClosedLocalPosition").vector3Value = rightHome - closedInset;
+            serialized.ApplyModifiedPropertiesWithoutUndo();
+
+            // CUE が押されるまでは非表示
+            root.SetActive(false);
+
+            return clapHandsView;
+        }
+
+        private static Transform InstantiateHand(
+            GameObject prefab, Transform parent, string name, Vector3 localPosition, Vector3 localEulerAngles)
+        {
+            if (prefab == null)
+            {
+                Debug.LogWarning($"[MixVerse] {name} 用の手 Prefab が見つかりませんでした（SimpleHands アセットを確認してください）。仮のオブジェクトを置きます。");
+
+                var placeholder = new GameObject(name);
+                placeholder.transform.SetParent(parent, false);
+                placeholder.transform.localPosition = localPosition;
+                placeholder.transform.localRotation = Quaternion.Euler(localEulerAngles);
+                return placeholder.transform;
+            }
+
+            var instance = (GameObject)PrefabUtility.InstantiatePrefab(prefab, parent);
+            instance.name = name;
+            instance.transform.SetParent(parent, false);
+            instance.transform.localPosition = localPosition;
+            instance.transform.localRotation = Quaternion.Euler(localEulerAngles);
+
+            // Animator は使わず ClapHandsView が Transform を直接動かすため、未設定の Controller による警告を避ける意味でも無効化する
+            var animator = instance.GetComponent<Animator>();
+            if (animator != null)
+            {
+                animator.enabled = false;
+            }
+
+            return instance.transform;
         }
 
         private static SelectionArrowView CreateSelectionArrow(Transform parent, Sprite arrowSprite)
@@ -353,8 +465,8 @@ namespace MixVerse.EditorTools
                 return;
             }
 
-            camera.transform.position = new Vector3(0f, 7f, -6.5f);
-            camera.transform.rotation = Quaternion.Euler(48f, 0f, 0f);
+            camera.transform.position = DefaultCameraPosition;
+            camera.transform.rotation = Quaternion.Euler(DefaultCameraEulerAngles);
 
             // 3D のカードを EventSystem 経由でクリックできるようにする
             if (camera.GetComponent<PhysicsRaycaster>() == null)
@@ -395,6 +507,19 @@ namespace MixVerse.EditorTools
             quad.GetComponent<MeshRenderer>().sharedMaterial = material;
 
             return quad;
+        }
+
+        private static DrawCameraSettings CreateOrLoadDrawCameraSettings(string assetPath)
+        {
+            var settings = AssetDatabase.LoadAssetAtPath<DrawCameraSettings>(assetPath);
+
+            if (settings == null)
+            {
+                settings = ScriptableObject.CreateInstance<DrawCameraSettings>();
+                AssetDatabase.CreateAsset(settings, assetPath);
+            }
+
+            return settings;
         }
 
         private static Material CreateUnlitMaterial(string assetPath, Color color)
