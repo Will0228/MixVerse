@@ -37,6 +37,36 @@ namespace MixVerse
         }
 
         /// <summary>
+        /// Transform をワールド座標で移動・回転させる。カメラを専用位置へ動かす演出に使う。
+        /// </summary>
+        public static async UniTask MoveAsync(
+            Transform target,
+            Vector3 toPosition,
+            Quaternion toRotation,
+            float duration,
+            CancellationToken token,
+            bool useSmoothStep = true)
+        {
+            if (target == null)
+            {
+                return;
+            }
+
+            var fromPosition = target.position;
+            var fromRotation = target.rotation;
+
+            await RunAsync(duration, token, t =>
+            {
+                var rate = useSmoothStep ? Mathf.SmoothStep(0f, 1f, t) : t;
+                target.position = Vector3.LerpUnclamped(fromPosition, toPosition, rate);
+                target.rotation = Quaternion.SlerpUnclamped(fromRotation, toRotation, rate);
+            });
+
+            target.position = toPosition;
+            target.rotation = toRotation;
+        }
+
+        /// <summary>
         /// Transform をローカル座標で移動・回転させる。手札の整列に使う。
         /// </summary>
         public static async UniTask MoveLocalAsync(

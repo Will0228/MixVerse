@@ -16,12 +16,26 @@ namespace MixVerse.Game.View
         [SerializeField] private float _maxWidth = 6.0f;
         [SerializeField] private float _depthStep = 0.004f;
 
+        [Header("Draw Camera (相手の手札を引く演出用。未設定なら演出なし)")]
+        [SerializeField] private Transform _drawCameraPoint;
+        [SerializeField] private Vector3 _drawFacingEuler;
+
         private readonly List<CardView> _cards = new List<CardView>();
 
         public IReadOnlyList<CardView> Cards => _cards;
 
         /// <summary>この手札を表向きで並べるか。自分の手札だけ true。</summary>
         public bool IsFaceUp => _isFaceUp;
+
+        /// <summary>
+        /// この手札から引く際に使う専用カメラの位置・向き。未設定ならカメラ演出は行わない。
+        /// </summary>
+        public Transform DrawCameraPoint => _drawCameraPoint;
+
+        /// <summary>
+        /// 引かれている間、この手札がこちらを向くように取る回転（ローカル）。
+        /// </summary>
+        public Quaternion DrawFacingRotation => Quaternion.Euler(_drawFacingEuler);
 
         public int Count => _cards.Count;
 
