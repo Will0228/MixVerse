@@ -26,6 +26,9 @@ namespace MixVerse.Midi
         [Tooltip("手札選択の開始と確定に使うノート番号（SYNC ボタン）。")]
         [SerializeField] private int _syncNoteNumber = 71;
 
+        [Tooltip("拍手する手の呼び出しに使うノート番号（CUE ボタン）。")]
+        [SerializeField] private int _cueNoteNumber = 67;
+
         [Tooltip("カーソルを左右に動かすコントロールチェンジ番号（ジョグ）。")]
         [SerializeField] private int _jogControlNumber = 27;
 
@@ -36,6 +39,7 @@ namespace MixVerse.Midi
         [SerializeField] private bool _logToConsole;
 
         private readonly Subject<Unit> _onSyncPressed = new Subject<Unit>();
+        private readonly Subject<Unit> _onCuePressed = new Subject<Unit>();
         private readonly Subject<int> _onJogStep = new Subject<int>();
 
         private readonly Dictionary<MidiDevice, Handlers> _boundDevices = new Dictionary<MidiDevice, Handlers>();
@@ -43,7 +47,10 @@ namespace MixVerse.Midi
         /// <summary>SYNC ボタンが押された。</summary>
         public Observable<Unit> OnSyncPressed => _onSyncPressed;
 
-        /// <summary>ジョグが回された。+1 が右、-1 が左。</summary>
+        /// <summary>CUE ボタンが押された。</summary>
+        public Observable<Unit> OnCuePressed => _onCuePressed;
+
+        /// <summary>スクラッチが回された。+1 が右、-1 が左。</summary>
         public Observable<int> OnJogStep => _onJogStep;
 
         private sealed class Handlers
@@ -77,6 +84,7 @@ namespace MixVerse.Midi
         private void OnDestroy()
         {
             _onSyncPressed.Dispose();
+            _onCuePressed.Dispose();
             _onJogStep.Dispose();
         }
 
@@ -132,18 +140,27 @@ namespace MixVerse.Midi
 
         private void OnNoteOn(int noteNumber, float velocity)
         {
-            if (noteNumber != _syncNoteNumber)
+            // Minis はベロシティ0を NoteOff として扱うため、ここに来た時点で押下とみなせる
+            if (noteNumber == _syncNoteNumber)
             {
+                if (_logToConsole)
+                {
+                    Debug.Log($"[DJ] SYNC pressed (note {noteNumber}, velocity {velocity:0.000})");
+                }
+
+                _onSyncPressed.OnNext(Unit.Default);
                 return;
             }
 
-            // Minis はベロシティ0を NoteOff として扱うため、ここに来た時点で押下とみなせる
-            if (_logToConsole)
+            if (noteNumber == _cueNoteNumber)
             {
-                Debug.Log($"[DJ] SYNC pressed (note {noteNumber}, velocity {velocity:0.000})");
-            }
+                if (_logToConsole)
+                {
+                    Debug.Log($"[DJ] CUE pressed (note {noteNumber}, velocity {velocity:0.000})");
+                }
 
-            _onSyncPressed.OnNext(Unit.Default);
+                _onCuePressed.OnNext(Unit.Default);
+            }
         }
 
         private void OnControlChange(int controlNumber, float value)
