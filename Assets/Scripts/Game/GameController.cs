@@ -25,6 +25,9 @@ namespace MixVerse.Game
         {
             base.ChangeController();
 
+            // CUE ボタンの拍手はターン進行と独立して常に受け付けるため、ここで一度だけ購読する
+            _presenter.SetupClapGesture(disposable);
+
             _cancellationTokenSource = new CancellationTokenSource();
             PlayAsync(_cancellationTokenSource.Token).Forget();
         }

@@ -28,6 +28,7 @@ namespace MixVerse.Game
         private readonly OldMaidGame _game;
         private readonly CpuStrategy _cpuStrategy;
         private readonly DjControllerInput _djController;
+        private readonly ClapGestureDetector _clapGestureDetector = new ClapGestureDetector();
 
         private Random _random;
 
@@ -43,6 +44,42 @@ namespace MixVerse.Game
         public bool IsGameOver => _game.IsGameOver;
 
         public bool IsHumanTurn => _game.CurrentPlayerIndex == HumanPlayerIndex;
+
+        /// <summary>
+        /// CUE ボタンで手を出し入れし、表示中はジョグの回転方向で拍手する手を開閉させる。
+        /// 時計回りで合わせ、反時計回りで放す。手番の進行とは独立して常に受け付けるため、
+        /// Controller のライフサイクルに紐づけて一度だけ呼ぶ。
+        /// </summary>
+        public void SetupClapGesture(CompositeDisposable disposable)
+        {
+            if (_djController == null)
+            {
+                return;
+            }
+
+            _djController.OnCuePressed
+                .Subscribe(_ =>
+                {
+                    _view.ToggleClapHands();
+                    _clapGestureDetector.Reset();
+                })
+                .AddTo(disposable);
+
+            _djController.OnJogStep
+                .Subscribe(step =>
+                {
+                    if (!_view.IsClapHandsVisible)
+                    {
+                        return;
+                    }
+
+                    if (_clapGestureDetector.RegisterStep(step, out var isClosed))
+                    {
+                        _view.SetHandsClosed(isClosed);
+                    }
+                })
+                .AddTo(disposable);
+        }
 
         /// <summary>
         /// 画面を表示し、山札を配るところまで行う。
@@ -128,7 +165,7 @@ namespace MixVerse.Game
             var cardCount = _game.Hands[targetIndex].Count;
             var cursor = 0;
 
-            _view.SetSelectableHand(targetIndex);
+            await _view.BeginDrawSelectionAsync(targetIndex, token);
             _view.ShowArrowAt(targetIndex, cursor);
             _view.SetTurnText("Turn the jog to move - press SYNC to draw from " + GetPlayerName(targetIndex));
 
@@ -157,7 +194,7 @@ namespace MixVerse.Game
         private async UniTask<int> WaitForMouseOnlySelectionAsync(int targetIndex, CancellationToken token)
         {
             _view.SetTurnText("Your turn - pick a card from " + GetPlayerName(targetIndex));
-            _view.SetSelectableHand(targetIndex);
+            await _view.BeginDrawSelectionAsync(targetIndex, token);
 
             var selected = await _view.OnCardClicked.FirstAsync(token);
 

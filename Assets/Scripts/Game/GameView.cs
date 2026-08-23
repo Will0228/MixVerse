@@ -20,6 +20,7 @@ namespace MixVerse.Game
         [SerializeField] private HandView[] _handViews;
         [SerializeField] private Transform _discardPile;
         [SerializeField] private Camera _boardCamera;
+        [SerializeField] private ClapHandsView _clapHandsView;
 
         [Header("Hud")]
         [SerializeField] private CanvasGroup _canvasGroup;
@@ -40,9 +41,22 @@ namespace MixVerse.Game
         [SerializeField] private float _dealInterval = 0.02f;
         [SerializeField] private float _arrangeDuration = 0.2f;
 
+        [Header("Draw Camera")]
+        // 引く対象の手札に DrawCameraPoint が設定されているときだけ演出する
+        [SerializeField] private DrawCameraSettings _drawCameraSettings;
+        // カードを引く前の、カメラを戻す先の位置・向き。未設定ならカメラの現在位置を使う
+        [SerializeField] private Transform _defaultCameraPoint;
+
         private readonly Subject<CardView> _onCardClicked = new Subject<CardView>();
         private readonly CompositeDisposable _cardSubscriptions = new CompositeDisposable();
         private readonly List<CardView> _spawnedCards = new List<CardView>();
+
+        // 選択可能になった瞬間からカードが自分の手札に加わるまでカメラを専用位置に置いておくための状態。
+        // BeginDrawSelectionAsync で開始し、PlayDrawAsync 側で終了させる。
+        private HandView _activeDrawCameraHand;
+        private Vector3 _drawCameraHomePosition;
+        private Quaternion _drawCameraHomeRotation;
+        private Quaternion _drawHandHomeRotation;
 
         /// <summary>捨て札置き場に積まれた枚数。積み上げる高さの計算に使う。</summary>
         private int _discardStackCount;
@@ -187,9 +201,73 @@ namespace MixVerse.Game
             toHand.Add(cardView);
             cardView.SetFaceUp(toHand.IsFaceUp);
 
+            // 選択可能になった瞬間から寄せていたカメラは、カードが自分の手札に加わったここで戻す
+            if (_activeDrawCameraHand == fromHand)
+            {
+                _activeDrawCameraHand = null;
+                await PlayDrawCameraOutAsync(fromHand, _drawCameraHomePosition, _drawCameraHomeRotation, _drawHandHomeRotation, token);
+            }
+
             await UniTask.WhenAll(
                 toHand.ArrangeAsync(_arrangeDuration, token),
                 fromHand.ArrangeAsync(_arrangeDuration, token));
+        }
+
+        /// <summary>
+        /// 引く対象の手札を選択可能にする。専用カメラ位置が設定されていれば、
+        /// そこに寄せつつ手札をこちらへ向け、カードが引かれて自分の手札に加わるまでその位置を保つ。
+        /// </summary>
+        public async UniTask BeginDrawSelectionAsync(int targetIndex, CancellationToken token)
+        {
+            SetSelectableHand(targetIndex);
+
+            var hand = _handViews[targetIndex];
+
+            if (_drawCameraSettings == null || hand.DrawCameraPoint == null)
+            {
+                return;
+            }
+
+            _activeDrawCameraHand = hand;
+
+            if (_defaultCameraPoint != null)
+            {
+                _drawCameraHomePosition = _defaultCameraPoint.position;
+                _drawCameraHomeRotation = _defaultCameraPoint.rotation;
+            }
+            else
+            {
+                var cameraTransform = BoardCamera.transform;
+                _drawCameraHomePosition = cameraTransform.position;
+                _drawCameraHomeRotation = cameraTransform.rotation;
+            }
+
+            _drawHandHomeRotation = hand.transform.localRotation;
+
+            await PlayDrawCameraInAsync(hand, token);
+        }
+
+        /// <summary>
+        /// カメラを相手の手札の専用位置へ寄せつつ、その手札をこちらへ向ける。
+        /// </summary>
+        private UniTask PlayDrawCameraInAsync(HandView fromHand, CancellationToken token)
+        {
+            var point = fromHand.DrawCameraPoint;
+
+            return UniTask.WhenAll(
+                TweenUtility.MoveAsync(BoardCamera.transform, point.position, point.rotation, _drawCameraSettings.TransitionDuration, token),
+                TweenUtility.MoveLocalAsync(fromHand.transform, fromHand.transform.localPosition, fromHand.DrawFacingRotation, _drawCameraSettings.TransitionDuration, token));
+        }
+
+        /// <summary>
+        /// カメラと相手の手札を、演出前の位置・向きへ戻す。
+        /// </summary>
+        private UniTask PlayDrawCameraOutAsync(
+            HandView fromHand, Vector3 cameraPosition, Quaternion cameraRotation, Quaternion handRotation, CancellationToken token)
+        {
+            return UniTask.WhenAll(
+                TweenUtility.MoveAsync(BoardCamera.transform, cameraPosition, cameraRotation, _drawCameraSettings.TransitionDuration, token),
+                TweenUtility.MoveLocalAsync(fromHand.transform, fromHand.transform.localPosition, handRotation, _drawCameraSettings.TransitionDuration, token));
         }
 
         /// <summary>
@@ -252,6 +330,15 @@ namespace MixVerse.Game
         }
 
         public UniTask WaitAsync(float seconds, CancellationToken token) => TweenUtility.WaitAsync(seconds, token);
+
+        /// <summary>CUE ボタンで拍手する手が表示中か。</summary>
+        public bool IsClapHandsVisible => _clapHandsView != null && _clapHandsView.IsVisible;
+
+        /// <summary>拍手する手の表示・非表示を切り替える。</summary>
+        public void ToggleClapHands() => _clapHandsView?.Toggle();
+
+        /// <summary>スクラッチの回転方向に合わせて、拍手する手を閉じる（時計回り）か開く（反時計回り）かを切り替える。</summary>
+        public void SetHandsClosed(bool isClosed) => _clapHandsView?.SetHandsClosed(isClosed);
 
         /// <summary>
         /// 捨て札置き場での位置。中心から少しずらしつつ、積むほど高くする。
