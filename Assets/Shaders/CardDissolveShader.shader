@@ -3,6 +3,7 @@ Shader "Unlit/CardDissolveShader"
     Properties
     {
         _MainTex ("Texture", 2D) = "white" {}
+        _BaseColor ("Base Color", Color) = (1, 1, 1, 1)
         _NoiseTex ("Noise Texture", 2D) = "white" {}
         _Threshold ("Threshold", Range(0, 1)) = 0.5
         _EdgeStepOffset ("Edge Step Offset", Float) = 0.01
@@ -11,11 +12,14 @@ Shader "Unlit/CardDissolveShader"
     }
     SubShader
     {
+        // clip() で抜くだけで半透明合成はしないため、Transparent ではなく AlphaTest に置く。
+        // カードは全枚数がこのシェーダーで描かれるので、Transparent キューに入れると
+        // 手札のように重なり合う板の描画順が距離ソート任せになり、ちらつく。
         Tags
         {
-            "RenderType"="Transparent"
+            "RenderType"="TransparentCutout"
             "RenderPipeline"="UniversalPipeline"
-            "Queue" = "Transparent"
+            "Queue" = "AlphaTest"
         }
         LOD 100
 
@@ -46,6 +50,7 @@ Shader "Unlit/CardDissolveShader"
             SAMPLER(sampler_NoiseTex);
 
             CBUFFER_START(UnityPerMaterial)
+                float4 _BaseColor;
                 float _Threshold;
                 float _EdgeStepOffset;
                 float4 _EmissionColor;
@@ -62,12 +67,17 @@ Shader "Unlit/CardDissolveShader"
 
             half4 frag (Varyings i) : SV_Target
             {
-                half4 col = SAMPLE_TEXTURE2D(_MainTex, sampler_MainTex, i.uv);
+                half4 col = SAMPLE_TEXTURE2D(_MainTex, sampler_MainTex, i.uv) * _BaseColor;
                 half noise = SAMPLE_TEXTURE2D(_NoiseTex, sampler_NoiseTex, i.uv).r;
                 clip(noise.r - _Threshold);
                 
                 float edge = step(noise.r, _Threshold + _EdgeStepOffset);
-                half3 emissionColor = _EmissionColor.rgb * (edge * _EmissionPower);
+
+                // _Threshold が 0（実体）のままでも、ノイズの暗い部分は _EdgeStepOffset の
+                // 範囲に入って光ってしまう。カードは常時このシェーダーで描かれるので、
+                // 溶けている最中だけ縁を光らせる。
+                float dissolving = step(0.001, _Threshold);
+                half3 emissionColor = _EmissionColor.rgb * (edge * _EmissionPower * dissolving);
                 
                 return half4(col.rgb + emissionColor, col.a);
             }

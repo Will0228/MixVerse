@@ -317,7 +317,8 @@ MonoBehaviour:
   _faceUpTiltAngle: 0
   _liftHeight: 0.8
   _liftDuration: 0.15
-  _moveDuration: 0.35
+  _dissolveOutDuration: 0.35
+  _dissolveInDuration: 0.35
   _tossDuration: 0.45
   _tossArcHeight: 1.2
   _tossSpinDegrees: 0

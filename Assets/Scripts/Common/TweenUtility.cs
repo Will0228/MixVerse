@@ -169,6 +169,21 @@ namespace MixVerse
         }
 
         /// <summary>
+        /// 値を線形に補間する。マテリアルのパラメータなど、Transform 以外を動かすときに使う。
+        /// </summary>
+        public static async UniTask ValueAsync(
+            float from,
+            float to,
+            float duration,
+            CancellationToken token,
+            System.Action<float> onUpdate)
+        {
+            await RunAsync(duration, token, t => onUpdate(Mathf.Lerp(from, to, t)));
+
+            onUpdate(to);
+        }
+
+        /// <summary>
         /// 指定秒だけ待つ。CPU の思考時間の演出などに使う。
         /// </summary>
         public static UniTask WaitAsync(float seconds, CancellationToken token)

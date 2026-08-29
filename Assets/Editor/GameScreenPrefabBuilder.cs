@@ -17,6 +17,10 @@ namespace MixVerse.EditorTools
 
         private const string CardPrefabPath = PrefabFolder + "/Card.prefab";
 
+        // カードはディゾルブ演出のため専用シェーダーで描く
+        private const string DissolveShaderName = "Unlit/CardDissolveShader";
+        private const string NoiseTexturePath = "Assets/Textures/noise (2).jpg";
+
         // カードの見た目のサイズ（トランプの縦横比に近づけている）
         private const float CardWidth = 0.7f;
         private const float CardHeight = 1.0f;
@@ -27,8 +31,8 @@ namespace MixVerse.EditorTools
             EnsureFolder(PrefabFolder);
             EnsureFolder(MaterialFolder);
 
-            var faceMaterial = CreateUnlitMaterial(MaterialFolder + "/CardFaceMaterial.mat", new Color(0.96f, 0.96f, 0.96f));
-            var backMaterial = CreateUnlitMaterial(MaterialFolder + "/CardBackMaterial.mat", new Color(0.15f, 0.20f, 0.45f));
+            var faceMaterial = CreateCardMaterial(MaterialFolder + "/CardFaceMaterial.mat", new Color(0.96f, 0.96f, 0.96f));
+            var backMaterial = CreateCardMaterial(MaterialFolder + "/CardBackMaterial.mat", new Color(0.15f, 0.20f, 0.45f));
 
             BuildCardPrefab(faceMaterial, backMaterial);
 
@@ -125,12 +129,17 @@ namespace MixVerse.EditorTools
             return quad;
         }
 
-        private static Material CreateUnlitMaterial(string assetPath, Color color)
+        /// <summary>
+        /// カード用のマテリアルを作る。ディゾルブ量は CardView が
+        /// MaterialPropertyBlock でカードごとに上書きするので、ここでは 0（実体）のままにしておく。
+        /// </summary>
+        private static Material CreateCardMaterial(string assetPath, Color color)
         {
-            var shader = Shader.Find("Universal Render Pipeline/Unlit");
+            var shader = Shader.Find(DissolveShaderName);
             if (shader == null)
             {
-                shader = Shader.Find("Unlit/Color");
+                Debug.LogWarning($"[MixVerse] {DissolveShaderName} が見つかりません。ディゾルブなしの Unlit で作ります。");
+                shader = Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Unlit/Color");
             }
 
             var material = AssetDatabase.LoadAssetAtPath<Material>(assetPath);
@@ -153,6 +162,23 @@ namespace MixVerse.EditorTools
             if (material.HasProperty("_Color"))
             {
                 material.SetColor("_Color", color);
+            }
+
+            // シェーダー既定値は 0.5（半分溶けた状態）なので、実体の 0 に戻しておく
+            if (material.HasProperty("_Threshold"))
+            {
+                material.SetFloat("_Threshold", 0f);
+            }
+
+            if (material.HasProperty("_NoiseTex"))
+            {
+                var noiseTexture = AssetDatabase.LoadAssetAtPath<Texture2D>(NoiseTexturePath);
+                if (noiseTexture == null)
+                {
+                    Debug.LogWarning($"[MixVerse] ノイズテクスチャ {NoiseTexturePath} が見つかりません。ディゾルブの模様が出ません。");
+                }
+
+                material.SetTexture("_NoiseTex", noiseTexture);
             }
 
             EditorUtility.SetDirty(material);

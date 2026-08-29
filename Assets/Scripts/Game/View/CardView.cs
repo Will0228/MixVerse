@@ -19,7 +19,9 @@ namespace MixVerse.Game.View
         /// </summary>
         public static readonly Quaternion FaceDownFlip = Quaternion.Euler(0f, 180f, 0f);
 
-        private static readonly int BaseMapPropertyId = Shader.PropertyToID("_BaseMap");
+        // カードは CardDissolveShader で描く。絵柄もディゾルブ量もそのプロパティ名に合わせる。
+        private static readonly int MainTexPropertyId = Shader.PropertyToID("_MainTex");
+        private static readonly int DissolveThresholdPropertyId = Shader.PropertyToID("_Threshold");
 
         [SerializeField] private MeshRenderer _faceRenderer;
         [SerializeField] private MeshRenderer _backRenderer;
@@ -32,9 +34,13 @@ namespace MixVerse.Game.View
         [SerializeField] private float _faceUpTiltAngle;
 
         [Header("Draw Animation")]
+        // 引かれたカードは溶けて消えている間に移動するため、移動そのものの演出時間は持たない
         [SerializeField] private float _liftHeight = 0.8f;
         [SerializeField] private float _liftDuration = 0.15f;
-        [SerializeField] private float _moveDuration = 0.35f;
+
+        [Header("Dissolve")]
+        [SerializeField] private float _dissolveOutDuration = 0.35f;
+        [SerializeField] private float _dissolveInDuration = 0.35f;
 
         [Header("Discard Toss")]
         [SerializeField] private float _tossDuration = 0.45f;
@@ -48,6 +54,7 @@ namespace MixVerse.Game.View
         private readonly Subject<CardView> _onClicked = new Subject<CardView>();
 
         private MaterialPropertyBlock _facePropertyBlock;
+        private MaterialPropertyBlock _backPropertyBlock;
         private Vector3? _faceLocalDirection;
 
         /// <summary>カーソルが乗った。矢印 UI の表示に使う。</summary>
@@ -136,7 +143,7 @@ namespace MixVerse.Game.View
             _facePropertyBlock ??= new MaterialPropertyBlock();
 
             _faceRenderer.GetPropertyBlock(_facePropertyBlock);
-            _facePropertyBlock.SetTexture(BaseMapPropertyId, sprite.texture);
+            _facePropertyBlock.SetTexture(MainTexPropertyId, sprite.texture);
             _faceRenderer.SetPropertyBlock(_facePropertyBlock);
 
             // 絵柄が入ったらプレースホルダの文字は不要
@@ -193,14 +200,64 @@ namespace MixVerse.Game.View
         }
 
         /// <summary>
-        /// 引かれる演出。少し上に浮いてから引いた側の手札へ移動する。
+        /// 引かれる演出の前半。少し上に浮いてから、その場で溶けて消える。
+        /// 消えている間に呼び出し側が移動と表裏の切り替えを済ませ、PlayDissolveInAsync で実体化させる。
         /// </summary>
-        public async UniTask PlayDrawAsync(Vector3 destination, CancellationToken token)
+        public async UniTask PlayDissolveOutAsync(CancellationToken token)
         {
             var lifted = transform.position + Vector3.up * _liftHeight;
 
             await TweenUtility.MoveAsync(transform, lifted, _liftDuration, token);
-            await TweenUtility.MoveAsync(transform, destination, _moveDuration, token);
+            await PlayDissolveAsync(0f, 1f, _dissolveOutDuration, token);
+        }
+
+        /// <summary>
+        /// 消えた状態から実体化する演出。引いた側の手札へ加えたあとに呼ぶ。
+        /// </summary>
+        public async UniTask PlayDissolveInAsync(CancellationToken token)
+        {
+            await PlayDissolveAsync(1f, 0f, _dissolveInDuration, token);
+
+            // 溶けている間は隠していた文字を、表裏の状態に応じて戻す
+            SetFaceUpVisibility(IsFaceUp);
+        }
+
+        /// <summary>
+        /// ディゾルブ量を即座に設定する。0 が実体、1 が完全に消えた状態。
+        /// </summary>
+        public void SetDissolveAmount(float amount)
+        {
+            SetDissolveAmount(_faceRenderer, ref _facePropertyBlock, amount);
+            SetDissolveAmount(_backRenderer, ref _backPropertyBlock, amount);
+        }
+
+        private UniTask PlayDissolveAsync(float from, float to, float duration, CancellationToken token)
+        {
+            // 文字は TMP 側のシェーダーで描かれるためディゾルブしない。溶けている間は消しておく。
+            if (_faceLabel != null)
+            {
+                _faceLabel.enabled = false;
+            }
+
+            return TweenUtility.ValueAsync(from, to, duration, token, SetDissolveAmount);
+        }
+
+        /// <summary>
+        /// マテリアルを複製すると全カードで共有されなくなるうえ枚数分の実体ができるため、
+        /// SetFaceSprite と同じく MaterialPropertyBlock でカードごとに上書きする。
+        /// </summary>
+        private static void SetDissolveAmount(MeshRenderer meshRenderer, ref MaterialPropertyBlock propertyBlock, float amount)
+        {
+            if (meshRenderer == null)
+            {
+                return;
+            }
+
+            propertyBlock ??= new MaterialPropertyBlock();
+
+            meshRenderer.GetPropertyBlock(propertyBlock);
+            propertyBlock.SetFloat(DissolveThresholdPropertyId, amount);
+            meshRenderer.SetPropertyBlock(propertyBlock);
         }
 
         /// <summary>

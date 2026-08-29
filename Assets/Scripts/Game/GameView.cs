@@ -181,7 +181,7 @@ namespace MixVerse.Game
         }
 
         /// <summary>
-        /// 引かれたカードが上に浮いてから、引いた側の手札へ移動する演出。
+        /// 引かれたカードが上に浮いてから溶けて消え、引いた側の手札で実体化する演出。
         /// </summary>
         public async UniTask PlayDrawAsync(DrawResult result, CancellationToken token)
         {
@@ -195,18 +195,24 @@ namespace MixVerse.Game
             // 移動中は手札の子から外し、ワールド座標で動かす
             cardView.transform.SetParent(transform, true);
 
-            var destination = toHand.GetIncomingWorldPosition();
-            await cardView.PlayDrawAsync(destination, token);
+            await cardView.PlayDissolveOutAsync(token);
 
-            toHand.Add(cardView);
-            cardView.SetFaceUp(toHand.IsFaceUp);
-
-            // 選択可能になった瞬間から寄せていたカメラは、カードが自分の手札に加わったここで戻す
+            // 選択可能になった瞬間から寄せていたカメラは、カードが消えているこの間に戻す。
+            // 実体化を引いた側の手札で見せたいので、カメラを戻すのはディゾルブインより前。
             if (_activeDrawCameraHand == fromHand)
             {
                 _activeDrawCameraHand = null;
                 await PlayDrawCameraOutAsync(fromHand, _drawCameraHomePosition, _drawCameraHomeRotation, _drawHandHomeRotation, token);
             }
+
+            // 移動と表裏の切り替えも消えている間に済ませるので、
+            // 相手の手札から自分の手札へ飛ぶ様子や裏返る瞬間は見えない
+            cardView.transform.position = toHand.GetIncomingWorldPosition();
+
+            toHand.Add(cardView);
+            cardView.SetFaceUp(toHand.IsFaceUp);
+
+            await cardView.PlayDissolveInAsync(token);
 
             await UniTask.WhenAll(
                 toHand.ArrangeAsync(_arrangeDuration, token),
