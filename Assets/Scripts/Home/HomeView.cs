@@ -17,6 +17,16 @@ namespace MixVerse.Home
 
         private bool _isFading;
 
+        /// <summary>
+        /// ゲーム画面から戻ってきたときに再表示する。
+        /// </summary>
+        public void Show()
+        {
+            _isFading = false;
+            gameObject.SetActive(true);
+            _canvasGroup.alpha = 1.0f;
+        }
+
         public async UniTask StartGameAsync(CancellationToken token)
         {
             if (_isFading)

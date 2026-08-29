@@ -19,5 +19,7 @@ namespace MixVerse.Home
         }
         
         public async UniTask StartGameAsync(CancellationToken token) => await _view.StartGameAsync(token);
+
+        public void Show() => _view.Show();
     }
 }

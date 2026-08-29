@@ -33,6 +33,7 @@ namespace MixVerse.Home
         public override void ChangeController()
         {
             base.ChangeController();
+            _presenter.Show();
             SetEvent();
         }
 

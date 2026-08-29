@@ -46,6 +46,8 @@ namespace MixVerse.Game
                 _cancellationTokenSource = null;
             }
 
+            _presenter.HideView();
+
             base.LeaveController();
         }
 

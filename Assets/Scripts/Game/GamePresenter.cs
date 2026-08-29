@@ -281,7 +281,7 @@ namespace MixVerse.Game
 
             var loser = _game.LoserIndex;
             var resultText = loser == HumanPlayerIndex ? "You lose..." : GetPlayerName(loser) + " loses!";
-            _view.ShowResult(resultText + "\n5秒後にホーム画面に戻ります");
+            _view.ShowResult(resultText + "\nReturning to home in 5 seconds...");
         }
 
         /// <summary>
