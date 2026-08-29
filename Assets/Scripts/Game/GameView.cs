@@ -22,6 +22,9 @@ namespace MixVerse.Game
         [SerializeField] private Camera _boardCamera;
         [SerializeField] private ClapHandsView _clapHandsView;
 
+        [Header("Sound")]
+        [SerializeField] private AudioSource _bgmSource;
+
         [Header("Hud")]
         [SerializeField] private CanvasGroup _canvasGroup;
         // 3D の盤面は CanvasGroup ではフェードできないため、画面全体を覆う黒板を別に用意する
@@ -74,6 +77,11 @@ namespace MixVerse.Game
         public async UniTask ShowAsync(CancellationToken token)
         {
             gameObject.SetActive(true);
+
+            if (_bgmSource != null && !_bgmSource.isPlaying)
+            {
+                _bgmSource.Play();
+            }
 
             if (_selectionArrow != null)
             {
