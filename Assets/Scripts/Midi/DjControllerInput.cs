@@ -19,6 +19,9 @@ namespace MixVerse.Midi
         /// <summary>Minis は 0〜1 に正規化した値を渡すため、生の MIDI 値へ戻すのに使う。</summary>
         private const float MidiValueScale = 127.0f;
 
+        /// <summary>フェーダーに触れるまでの向き。真ん中なので正面を向く。</summary>
+        public const float DefaultFacingValue = 0.5f;
+
         [Header("MIDI Mapping")]
         [Tooltip("MIDI チャンネル。表示と同じ 1 始まりで指定する。")]
         [SerializeField] private int _midiChannel = 1;
@@ -40,6 +43,10 @@ namespace MixVerse.Midi
 
         [Tooltip("この生の MIDI 値(0〜127)なら右へ、それ以外なら左へ動かす。")]
         [SerializeField] private int _jogRightRawValue = 1;
+
+        [Header("Facing Fader")]
+        [Tooltip("どちらを向くかを決めるフェーダーのコントロールチェンジ番号。")]
+        [SerializeField] private int _facingControlNumber = 10;
 
         [Header("Cursor Knobs")]
         [Tooltip("CPU1 の照準を上下に動かすコントロールチェンジ番号（左デッキのツマミ）。")]
@@ -64,6 +71,7 @@ namespace MixVerse.Midi
         private readonly Subject<DjDeckSide> _onCuePressed = new Subject<DjDeckSide>();
         private readonly Subject<int> _onJogStep = new Subject<int>();
         private readonly Subject<DjCursorStep> _onCursorStep = new Subject<DjCursorStep>();
+        private readonly ReactiveProperty<float> _facingValue = new ReactiveProperty<float>(DefaultFacingValue);
 
         private readonly Dictionary<MidiDevice, Handlers> _boundDevices = new Dictionary<MidiDevice, Handlers>();
 
@@ -78,6 +86,13 @@ namespace MixVerse.Midi
 
         /// <summary>照準用のツマミが回された。どちらのデッキかと画面上の移動方向を持つ。</summary>
         public Observable<DjCursorStep> OnCursorStep => _onCursorStep;
+
+        /// <summary>
+        /// どちらをどれだけ向いているかを表すフェーダーの値。
+        /// 0.5 で正面、1 に近いほど左デッキ側、0 に近いほど右デッキ側を向く。
+        /// フェーダーに触れるまでは 0.5 のまま。
+        /// </summary>
+        public ReadOnlyReactiveProperty<float> FacingValue => _facingValue;
 
         private sealed class Handlers
         {
@@ -113,6 +128,7 @@ namespace MixVerse.Midi
             _onCuePressed.Dispose();
             _onJogStep.Dispose();
             _onCursorStep.Dispose();
+            _facingValue.Dispose();
         }
 
         private void OnDeviceChange(InputDevice device, InputDeviceChange change)
@@ -217,6 +233,20 @@ namespace MixVerse.Midi
             // ロータリーエンコーダは「右回りで 1、左回りで 127」のように
             // 値そのもので方向を表すことが多いため、しきい値ではなく一致で見る。
             var rawValue = Mathf.RoundToInt(value * MidiValueScale);
+
+            // フェーダーは倒した位置そのものを送ってくるので、正規化された値をそのまま保持する
+            if (controlNumber == _facingControlNumber)
+            {
+                var facing = Mathf.Clamp01(value);
+
+                if (_logToConsole)
+                {
+                    Debug.Log($"[DJ] Facing cc{controlNumber} value={facing:0.000}");
+                }
+
+                _facingValue.Value = facing;
+                return;
+            }
 
             if (controlNumber == _jogControlNumber)
             {

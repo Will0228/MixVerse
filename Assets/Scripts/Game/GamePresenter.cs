@@ -3,6 +3,7 @@ using Cysharp.Threading.Tasks;
 using MixVerse.Game.Model;
 using MixVerse.Midi;
 using R3;
+using UnityEngine;
 using VContainer;
 using Random = System.Random;
 
@@ -20,6 +21,7 @@ namespace MixVerse.Game
         private const float CpuThinkDuration = 0.6f;
         private const float CpuShowSelectionDuration = 0.5f;
         private const float TurnIntervalDuration = 0.2f;
+        private const float ResultToHomeDelay = 5f;
 
         /// <summary>SYNC が押されたことを表す番兵。手札インデックスと区別するため負値にする。</summary>
         private const int CursorConfirmed = -1;
@@ -29,6 +31,9 @@ namespace MixVerse.Game
 
         /// <summary>右デッキ（SYNC / CUE）が担当する相手。</summary>
         private const int RightDeckPlayerIndex = 2;
+
+        /// <summary>フェーダーを端まで振り切ったとみなす許容差。MIDI の1目盛り(1/127)より小さくしてある。</summary>
+        private const float FacingTolerance = 0.002f;
 
         private readonly GameView _view;
         private readonly OldMaidGame _game;
@@ -52,36 +57,38 @@ namespace MixVerse.Game
         public bool IsHumanTurn => _game.CurrentPlayerIndex == HumanPlayerIndex;
 
         /// <summary>
-        /// CUE ボタンで手を出し入れし、表示中はジョグの回転方向で拍手する手を開閉させる。
-        /// 左の CUE で CPU1、右の CUE で CPU2 を向く。正面を向いているときはどちらも受け付ける。
-        /// 時計回りで合わせ、反時計回りで放す。手番の進行とは独立して常に受け付けるため、
-        /// Controller のライフサイクルに紐づけて一度だけ呼ぶ。
+        /// フェーダーでどちらを向くかを決め、向いた相手に対して CUE で拍手する手を出し入れする。
+        /// 表示中はジョグの回転方向で手を開閉させる（時計回りで合わせ、反時計回りで放す）。
+        /// 手番の進行とは独立して常に受け付けるため、Controller のライフサイクルに紐づけて一度だけ呼ぶ。
         /// </summary>
-        public void SetupClapGesture(CompositeDisposable disposable, CancellationToken token)
+        public void SetupDjControls(CompositeDisposable disposable)
         {
             if (_djController == null)
             {
                 return;
             }
 
+            // 購読した時点の値（初期は 0.5 ＝ 正面）でカメラの向きも決まる
+            _djController.FacingValue
+                .Subscribe(ApplyFacing)
+                .AddTo(disposable);
+
             _djController.OnCuePressed
                 .Subscribe(deckSide =>
                 {
-                    // カード選択中（SYNC でカメラが専用位置にある間）は拍手を受け付けない
-                    if (_view.IsDrawCameraActive)
+                    // カード選択中（SYNC で照準を出している間）は拍手を受け付けない
+                    if (_view.IsDrawSelectionActive)
                     {
                         return;
                     }
 
-                    var targetIndex = GetDeckPlayerIndex(deckSide);
-
-                    // 誰かを向いている間は、その相手の CUE（＝正面に戻す操作）だけを受け付ける
-                    if (_view.IsClapCameraActive && _view.ClapCameraTargetIndex != targetIndex)
+                    // フェーダーがその相手を向き切っているときだけ手を出せる
+                    if (!CanActOn(GetDeckPlayerIndex(deckSide)))
                     {
                         return;
                     }
 
-                    _view.ToggleClapCamera(targetIndex, token);
+                    _view.ToggleClapHands();
                     _clapGestureDetector.Reset();
                 })
                 .AddTo(disposable);
@@ -100,6 +107,52 @@ namespace MixVerse.Game
                     }
                 })
                 .AddTo(disposable);
+        }
+
+        /// <summary>
+        /// フェーダーの値をカメラの向きへ反映する。0.5 で正面、1 で CPU1、0 で CPU2 を向く。
+        /// </summary>
+        private void ApplyFacing(float value)
+        {
+            var center = DjControllerInput.DefaultFacingValue;
+            var targetIndex = value >= center ? LeftDeckPlayerIndex : RightDeckPlayerIndex;
+
+            // 中央からの距離をそのまま向き具合にする（端まで倒すと 1）
+            _view.SetCameraFacing(targetIndex, Mathf.Abs(value - center) / center);
+
+            // 振り切っていない間はその相手に何もできないので、出したままの手は引っ込める
+            if (!CanActOn(targetIndex))
+            {
+                _view.HideClapHands();
+                _clapGestureDetector.Reset();
+            }
+        }
+
+        /// <summary>
+        /// フェーダーが端まで振り切っていて、その相手にアクションできるか。
+        /// 1 なら CPU1、0 なら CPU2。中途半端な向きではどちらにも何もできない。
+        /// </summary>
+        private bool CanActOn(int playerIndex)
+        {
+            // DJ コントローラーが無い環境ではマウスだけで遊ぶため、向きでは制限しない
+            if (_djController == null)
+            {
+                return true;
+            }
+
+            var value = _djController.FacingValue.CurrentValue;
+
+            if (playerIndex == LeftDeckPlayerIndex)
+            {
+                return value >= 1f - FacingTolerance;
+            }
+
+            if (playerIndex == RightDeckPlayerIndex)
+            {
+                return value <= FacingTolerance;
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -160,13 +213,21 @@ namespace MixVerse.Game
             _view.SetTurnText(string.Empty);
 
             var loser = _game.LoserIndex;
-            _view.ShowResult(loser == HumanPlayerIndex ? "You lose..." : GetPlayerName(loser) + " loses!");
+            var resultText = loser == HumanPlayerIndex ? "You lose..." : GetPlayerName(loser) + " loses!";
+            _view.ShowResult(resultText + "\n5秒後にホーム画面に戻ります");
         }
 
         /// <summary>
+        /// 決着後、ホーム画面へ戻るまでの待機。
+        /// </summary>
+        public UniTask WaitBeforeReturnToHomeAsync(CancellationToken token)
+            => _view.WaitAsync(ResultToHomeDelay, token);
+
+        /// <summary>
         /// 引く対象の手札を選べる状態にして、選ばれるまで待つ。
-        /// SYNC で選択を始めると画面のランダムな位置に照準が出るので、
-        /// 担当デッキのツマミで動かし、カードに重ねた状態で SYNC を押すと引ける。
+        /// フェーダーで引く相手を向き切ってから SYNC を押すと選択が始まり、
+        /// 画面のランダムな位置に照準が出るので、担当デッキのツマミで動かし、
+        /// カードに重ねた状態で SYNC を押すと引ける。
         /// 狙っているカードの上には View 側で矢印が表示される。
         /// </summary>
         private async UniTask<int> WaitForHumanSelectionAsync(int targetIndex, CancellationToken token)
@@ -180,16 +241,16 @@ namespace MixVerse.Game
             // ① SYNC が押されるまでは手札選択状態に入らない
             _view.ClearSelectable();
             _view.HideArrow();
-            _view.SetTurnText("Your turn - press " + GetDeckName(targetIndex) + " SYNC to start selecting");
+            _view.SetTurnText("Your turn - face " + GetPlayerName(targetIndex) + " with the fader, then press " + GetDeckName(targetIndex) + " SYNC");
 
-            // CUE で相手を向いて拍手している間は、SYNC を押しても無反応にする。
-            // 真正面に戻る（もう一度 CUE を押す）まで、押された SYNC はここで捨てて待ち続ける。
-            // 引く相手に対応していないデッキの SYNC（CPU1 が残っている間の右 SYNC など）も同じく捨てる。
+            // フェーダーで引く相手を向き切っていない間は、SYNC を押しても無反応にする。
+            // 拍手する手を出している間（もう一度 CUE を押すまで）も同じく受け付けない。
+            // 引く相手に対応していないデッキの SYNC（CPU1 が残っている間の右 SYNC など）もここで捨てる。
             while (true)
             {
                 var deckSide = await _djController.OnSyncPressed.FirstAsync(token);
 
-                if (!_view.IsClapCameraActive && GetDeckPlayerIndex(deckSide) == targetIndex)
+                if (GetDeckPlayerIndex(deckSide) == targetIndex && CanActOn(targetIndex) && !_view.IsClapHandsVisible)
                 {
                     break;
                 }
@@ -216,7 +277,7 @@ namespace MixVerse.Game
                 // SYNC で確定。マウスクリックでも確定できる。
                 var confirmations = Observable.Merge(
                     _djController.OnSyncPressed
-                        .Where(deckSide => GetDeckPlayerIndex(deckSide) == targetIndex)
+                        .Where(deckSide => GetDeckPlayerIndex(deckSide) == targetIndex && CanActOn(targetIndex))
                         .Select(_ => CursorConfirmed),
                     _view.OnCardClicked.Select(card => card.HandIndex));
 

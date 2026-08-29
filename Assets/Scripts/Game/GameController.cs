@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using Cysharp.Threading.Tasks;
+using MixVerse.Home;
 using UnityEngine;
 using VContainer;
 
@@ -12,13 +13,15 @@ namespace MixVerse.Game
     public sealed class GameController : ControllerBase
     {
         private readonly GamePresenter _presenter;
+        private readonly ScreenNavigator _navigator;
 
         private CancellationTokenSource _cancellationTokenSource;
 
         [Inject]
-        public GameController(GamePresenter presenter)
+        public GameController(GamePresenter presenter, ScreenNavigator navigator)
         {
             _presenter = presenter;
+            _navigator = navigator;
         }
 
         public override void ChangeController()
@@ -27,8 +30,8 @@ namespace MixVerse.Game
 
             _cancellationTokenSource = new CancellationTokenSource();
 
-            // CUE ボタンの拍手はターン進行と独立して常に受け付けるため、ここで一度だけ購読する
-            _presenter.SetupClapGesture(disposable, _cancellationTokenSource.Token);
+            // フェーダーの向きと CUE ボタンの拍手はターン進行と独立して常に受け付けるため、ここで一度だけ購読する
+            _presenter.SetupDjControls(disposable);
 
             PlayAsync(_cancellationTokenSource.Token).Forget();
         }
@@ -64,6 +67,10 @@ namespace MixVerse.Game
                 }
 
                 _presenter.ShowResult();
+
+                await _presenter.WaitBeforeReturnToHomeAsync(token);
+
+                _navigator.Navigate<HomeController>();
             }
             catch (OperationCanceledException)
             {

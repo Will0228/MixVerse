@@ -15,9 +15,6 @@ namespace MixVerse.Game
     /// </summary>
     public sealed class GameView : MonoBehaviour
     {
-        /// <summary>CUE でどの相手も向いていない（正面を向いている）ことを表す番兵。</summary>
-        private const int NoClapCameraTarget = -1;
-
         /// <summary>照準がどのカードにも重なっていないことを表す番兵。</summary>
         public const int NoTargetedCard = -1;
 
@@ -54,24 +51,21 @@ namespace MixVerse.Game
         [Header("Draw Camera")]
         // 引く対象の手札に DrawCameraPoint が設定されているときだけ演出する
         [SerializeField] private DrawCameraSettings _drawCameraSettings;
-        // カードを引く前の、カメラを戻す先の位置・向き。未設定ならカメラの現在位置を使う
+        // 正面（フェーダーが真ん中）を向いているときのカメラの向き。未設定なら最初に使ったときのカメラの向きを使う
         [SerializeField] private Transform _defaultCameraPoint;
 
         private readonly Subject<CardView> _onCardClicked = new Subject<CardView>();
         private readonly CompositeDisposable _cardSubscriptions = new CompositeDisposable();
         private readonly List<CardView> _spawnedCards = new List<CardView>();
 
-        // 選択可能になった瞬間からカードが自分の手札に加わるまでカメラを専用向きに保つための状態。
+        // 選択可能になった瞬間からカードが自分の手札に加わるまで、引く対象の手札をこちらへ向けておくための状態。
         // BeginDrawSelectionAsync で開始し、PlayDrawAsync 側で終了させる。
-        // カメラの位置は常に固定なので、戻す先として向きだけ覚えておく。
-        private HandView _activeDrawCameraHand;
-        private Quaternion _drawCameraHomeRotation;
+        private HandView _activeDrawHand;
         private Quaternion _drawHandHomeRotation;
 
-        // CUE ボタンで相手向きに寄せている間の状態。ToggleClapCamera で開始・終了を切り替える。
-        // 正面を向いている間は -1。
-        private int _clapCameraTargetIndex = NoClapCameraTarget;
-        private CancellationTokenSource _clapCameraCts;
+        // 正面を向いているときのカメラの向き。_defaultCameraPoint が未設定でも基準がずれないよう、最初に使った値を覚えておく。
+        private Quaternion _cameraHomeRotation;
+        private bool _hasCameraHomeRotation;
 
         /// <summary>捨て札置き場に積まれた枚数。積み上げる高さの計算に使う。</summary>
         private int _discardStackCount;
@@ -222,12 +216,12 @@ namespace MixVerse.Game
 
             await cardView.PlayDissolveOutAsync(token);
 
-            // 選択可能になった瞬間から向けていたカメラは、カードが消えているこの間に戻す。
-            // 実体化を引いた側の手札で見せたいので、カメラを戻すのはディゾルブインより前。
-            if (_activeDrawCameraHand == fromHand)
+            // 選択可能になった瞬間からこちらへ向けていた手札は、カードが消えているこの間に戻す。
+            // 実体化を引いた側の手札で見せたいので、戻すのはディゾルブインより前。
+            if (_activeDrawHand == fromHand)
             {
-                _activeDrawCameraHand = null;
-                await PlayDrawCameraOutAsync(fromHand, _drawCameraHomeRotation, _drawHandHomeRotation, token);
+                _activeDrawHand = null;
+                await PlayHandFacingAsync(fromHand, _drawHandHomeRotation, token);
             }
 
             // 移動と表裏の切り替えも消えている間に済ませるので、
@@ -245,9 +239,9 @@ namespace MixVerse.Game
         }
 
         /// <summary>
-        /// 引く対象の手札を選択可能にする。専用カメラ向きが設定されていれば、
-        /// カメラの位置は固定したままそちらへ向け、手札もこちらへ向ける。
+        /// 引く対象の手札を選択可能にして、その手札をこちらへ向ける。
         /// カードが引かれて自分の手札に加わるまでその向きを保つ。
+        /// カメラの向きはフェーダー（SetCameraFacing）が決めるので、ここでは触らない。
         /// </summary>
         public async UniTask BeginDrawSelectionAsync(int targetIndex, CancellationToken token)
         {
@@ -260,39 +254,18 @@ namespace MixVerse.Game
                 return;
             }
 
-            _activeDrawCameraHand = hand;
-
-            _drawCameraHomeRotation = _defaultCameraPoint != null
-                ? _defaultCameraPoint.rotation
-                : BoardCamera.transform.rotation;
-
+            _activeDrawHand = hand;
             _drawHandHomeRotation = hand.transform.localRotation;
 
-            await PlayDrawCameraInAsync(hand, token);
+            await PlayHandFacingAsync(hand, hand.DrawFacingRotation, token);
         }
 
         /// <summary>
-        /// カメラの位置は変えずに相手の手札の専用向きへ向けつつ、その手札をこちらへ向ける。
+        /// 相手の手札を指定の向きへ回す。位置は動かさない。
         /// </summary>
-        private UniTask PlayDrawCameraInAsync(HandView fromHand, CancellationToken token)
-        {
-            var point = fromHand.DrawCameraPoint;
-
-            return UniTask.WhenAll(
-                TweenUtility.RotateAsync(BoardCamera.transform, point.rotation, _drawCameraSettings.TransitionDuration, token),
-                TweenUtility.MoveLocalAsync(fromHand.transform, fromHand.transform.localPosition, fromHand.DrawFacingRotation, _drawCameraSettings.TransitionDuration, token));
-        }
-
-        /// <summary>
-        /// カメラと相手の手札を、演出前の向きへ戻す。カメラの位置は動かさない。
-        /// </summary>
-        private UniTask PlayDrawCameraOutAsync(
-            HandView fromHand, Quaternion cameraRotation, Quaternion handRotation, CancellationToken token)
-        {
-            return UniTask.WhenAll(
-                TweenUtility.RotateAsync(BoardCamera.transform, cameraRotation, _drawCameraSettings.TransitionDuration, token),
-                TweenUtility.MoveLocalAsync(fromHand.transform, fromHand.transform.localPosition, handRotation, _drawCameraSettings.TransitionDuration, token));
-        }
+        private UniTask PlayHandFacingAsync(HandView hand, Quaternion localRotation, CancellationToken token)
+            => TweenUtility.MoveLocalAsync(
+                hand.transform, hand.transform.localPosition, localRotation, _drawCameraSettings.TransitionDuration, token);
 
         /// <summary>
         /// 引く対象の手札だけをクリックできるようにする。
@@ -396,48 +369,35 @@ namespace MixVerse.Game
         /// <summary>CUE ボタンで拍手する手が表示中か。</summary>
         public bool IsClapHandsVisible => _clapHandsView != null && _clapHandsView.IsVisible;
 
-        /// <summary>カード選択中（SYNC でカメラが専用位置にある間）か。CUE を受け付けるかの判定に使う。</summary>
-        public bool IsDrawCameraActive => _activeDrawCameraHand != null;
-
-        /// <summary>CUE でカメラが相手向きになっているか。SYNC を受け付けるかの判定に使う。</summary>
-        public bool IsClapCameraActive => _clapCameraTargetIndex != NoClapCameraTarget;
-
-        /// <summary>CUE で向いている相手のプレイヤー番号。正面を向いていれば -1。</summary>
-        public int ClapCameraTargetIndex => _clapCameraTargetIndex;
+        /// <summary>カード選択中（SYNC で照準を出している間）か。CUE を受け付けるかの判定に使う。</summary>
+        public bool IsDrawSelectionActive => _activeDrawHand != null;
 
         /// <summary>
-        /// CUE ボタンで、カメラの位置は固定したまま対象プレイヤーの手札用向き
-        /// （カード選択時と同じ DrawCameraPoint）へ向けつつ拍手する手を出す。
-        /// 同じ相手に対してもう一度呼ぶと真正面へ戻す。
-        /// カード選択中は Presenter 側で呼び出さないようにガードしてもらう想定。
+        /// カメラの位置は変えずに、正面と対象プレイヤーの間で向きを補間する。
+        /// amount が 0 なら正面、1 なら対象プレイヤーの手札用の向き（カード選択時と同じ DrawCameraPoint）。
+        /// フェーダーを動かした分だけ首を振る操作感にしたいので、演出は挟まず即座に反映する。
         /// </summary>
-        public void ToggleClapCamera(int targetIndex, CancellationToken token)
+        public void SetCameraFacing(int targetIndex, float amount)
         {
-            // 同じ相手を向いている状態で押されたら正面へ戻す
-            var isTurningToTarget = _clapCameraTargetIndex != targetIndex;
-            _clapCameraTargetIndex = isTurningToTarget ? targetIndex : NoClapCameraTarget;
+            var boardCamera = BoardCamera;
 
-            _clapCameraCts?.Cancel();
-            _clapCameraCts?.Dispose();
-            _clapCameraCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+            if (boardCamera == null)
+            {
+                return;
+            }
 
-            if (isTurningToTarget)
-            {
-                var point = GetClapCameraPoint(targetIndex);
-                _clapHandsView?.Show();
-                PlayClapCameraAsync(point, _clapCameraCts.Token).Forget();
-            }
-            else
-            {
-                _clapHandsView?.Hide();
-                PlayClapCameraAsync(_defaultCameraPoint, _clapCameraCts.Token).Forget();
-            }
+            var home = GetCameraHomeRotation();
+            var point = GetFacingCameraPoint(targetIndex);
+
+            boardCamera.transform.rotation = point == null
+                ? home
+                : Quaternion.Slerp(home, point.rotation, Mathf.Clamp01(amount));
         }
 
         /// <summary>
-        /// 拍手時に向く先。カード選択時と同じく、対象プレイヤーの手札に設定された DrawCameraPoint を使う。
+        /// 向く先。カード選択時と同じく、対象プレイヤーの手札に設定された DrawCameraPoint を使う。
         /// </summary>
-        private Transform GetClapCameraPoint(int targetIndex)
+        private Transform GetFacingCameraPoint(int targetIndex)
         {
             if (targetIndex < 0 || targetIndex >= _handViews.Length)
             {
@@ -447,28 +407,34 @@ namespace MixVerse.Game
             return _handViews[targetIndex].DrawCameraPoint;
         }
 
-        /// <summary>スクラッチの回転方向に合わせて、拍手する手を閉じる（時計回り）か開く（反時計回り）かを切り替える。</summary>
-        public void SetHandsClosed(bool isClosed) => _clapHandsView?.SetHandsClosed(isClosed);
+        /// <summary>
+        /// 正面を向いているときのカメラの向き。フェーダーを動かすたびに基準がずれないよう、一度だけ確定させる。
+        /// </summary>
+        private Quaternion GetCameraHomeRotation()
+        {
+            if (!_hasCameraHomeRotation)
+            {
+                _cameraHomeRotation = _defaultCameraPoint != null
+                    ? _defaultCameraPoint.rotation
+                    : BoardCamera.transform.rotation;
+
+                _hasCameraHomeRotation = true;
+            }
+
+            return _cameraHomeRotation;
+        }
 
         /// <summary>
-        /// カメラの位置は変えずに指定の向きへ回す。向きが未設定、または演出タイミングが未設定なら何もしない。
+        /// CUE ボタンで拍手する手を出し入れする。カメラの向きはフェーダーが決めるため、ここでは触らない。
+        /// フェーダーが相手を向き切っていない間は Presenter 側で呼ばれない想定。
         /// </summary>
-        private async UniTask PlayClapCameraAsync(Transform point, CancellationToken token)
-        {
-            if (point == null || _drawCameraSettings == null)
-            {
-                return;
-            }
+        public void ToggleClapHands() => _clapHandsView?.Toggle();
 
-            try
-            {
-                await TweenUtility.RotateAsync(BoardCamera.transform, point.rotation, _drawCameraSettings.TransitionDuration, token);
-            }
-            catch (System.OperationCanceledException)
-            {
-                // 連打などで次の切り替えに割り込まれた場合はここに来る
-            }
-        }
+        /// <summary>フェーダーが端から離れたときなど、拍手する手を引っ込める。</summary>
+        public void HideClapHands() => _clapHandsView?.Hide();
+
+        /// <summary>スクラッチの回転方向に合わせて、拍手する手を閉じる（時計回り）か開く（反時計回り）かを切り替える。</summary>
+        public void SetHandsClosed(bool isClosed) => _clapHandsView?.SetHandsClosed(isClosed);
 
         /// <summary>
         /// 捨て札置き場での位置。中心から少しずらしつつ、積むほど高くする。
@@ -554,9 +520,6 @@ namespace MixVerse.Game
         {
             _cardSubscriptions.Dispose();
             _onCardClicked.Dispose();
-
-            _clapCameraCts?.Cancel();
-            _clapCameraCts?.Dispose();
         }
     }
 }
