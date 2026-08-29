@@ -24,6 +24,9 @@ namespace MixVerse.Game
         [SerializeField] private Transform _discardPile;
         [SerializeField] private Camera _boardCamera;
         [SerializeField] private ClapHandsView _clapHandsView;
+        // 手札と同じ並び（0 がプレイヤー）。体力が初めて減った CPU をここで変身させる。
+        // プレイヤーの枠と、変身しないキャラクターの枠は空のままでよい。
+        [SerializeField] private GlitchMorphEffect[] _characterMorphs;
 
         [Header("Sound")]
         [SerializeField] private AudioSource _bgmSource;
@@ -104,6 +107,9 @@ namespace MixVerse.Game
             {
                 _resultLabel.gameObject.SetActive(false);
             }
+
+            // 前の対局で変身したままのキャラクターを元に戻す
+            ResetCharacterMorphs();
 
             // 黒板を消しながら HUD を出すことで、盤面ごとフェードインしているように見せる
             await UniTask.WhenAll(
@@ -366,6 +372,11 @@ namespace MixVerse.Game
 
         public UniTask WaitAsync(float seconds, CancellationToken token) => TweenUtility.WaitAsync(seconds, token);
 
+        /// <summary>
+        /// ホーム画面へ戻る際に、この画面を非表示にする。
+        /// </summary>
+        public void Hide() => gameObject.SetActive(false);
+
         /// <summary>CUE ボタンで拍手する手が表示中か。</summary>
         public bool IsClapHandsVisible => _clapHandsView != null && _clapHandsView.IsVisible;
 
@@ -435,6 +446,51 @@ namespace MixVerse.Game
 
         /// <summary>スクラッチの回転方向に合わせて、拍手する手を閉じる（時計回り）か開く（反時計回り）かを切り替える。</summary>
         public void SetHandsClosed(bool isClosed) => _clapHandsView?.SetHandsClosed(isClosed);
+
+        /// <summary>
+        /// 指定プレイヤーのキャラクターを、グリッチで乱れさせながら別のキャラクターへ変える。
+        /// 変身先が設定されていない相手や、すでに変身中の相手なら何もしない。
+        /// </summary>
+        public async UniTask PlayCharacterMorphAsync(int playerIndex, CancellationToken token)
+        {
+            var morph = GetCharacterMorph(playerIndex);
+
+            if (morph == null || morph.IsPlaying)
+            {
+                return;
+            }
+
+            await morph.PlayAsync(token);
+        }
+
+        /// <summary>
+        /// 変身したキャラクターを変身前の状態へ戻す。次の対局を同じ見た目で始めるために使う。
+        /// </summary>
+        private void ResetCharacterMorphs()
+        {
+            if (_characterMorphs == null)
+            {
+                return;
+            }
+
+            foreach (var morph in _characterMorphs)
+            {
+                if (morph != null)
+                {
+                    morph.ResetToStart();
+                }
+            }
+        }
+
+        private GlitchMorphEffect GetCharacterMorph(int playerIndex)
+        {
+            if (_characterMorphs == null || playerIndex < 0 || playerIndex >= _characterMorphs.Length)
+            {
+                return null;
+            }
+
+            return _characterMorphs[playerIndex];
+        }
 
         /// <summary>
         /// 捨て札置き場での位置。中心から少しずらしつつ、積むほど高くする。

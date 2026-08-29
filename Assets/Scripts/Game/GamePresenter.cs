@@ -38,17 +38,19 @@ namespace MixVerse.Game
         private readonly GameView _view;
         private readonly OldMaidGame _game;
         private readonly CpuStrategy _cpuStrategy;
+        private readonly CpuHealth _cpuHealth;
         private readonly DjControllerInput _djController;
         private readonly ClapGestureDetector _clapGestureDetector = new ClapGestureDetector();
 
         private Random _random;
 
         [Inject]
-        public GamePresenter(GameView view, OldMaidGame game, CpuStrategy cpuStrategy, DjControllerInput djController)
+        public GamePresenter(GameView view, OldMaidGame game, CpuStrategy cpuStrategy, CpuHealth cpuHealth, DjControllerInput djController)
         {
             _view = view;
             _game = game;
             _cpuStrategy = cpuStrategy;
+            _cpuHealth = cpuHealth;
             _djController = djController;
         }
 
@@ -162,6 +164,7 @@ namespace MixVerse.Game
         {
             _random = new Random(seed);
             _game.Start(OldMaidGame.DefaultPlayerCount, seed);
+            _cpuHealth.Reset(OldMaidGame.DefaultPlayerCount);
 
             await _view.ShowAsync(token);
             await _view.DealAsync(_game.Hands, token);
@@ -180,6 +183,8 @@ namespace MixVerse.Game
             {
                 await _view.DiscardPairsAsync(playerIndex, discardedPerPlayer[playerIndex], token);
             }
+
+            await ApplyPlayerDiscardDamageAsync(discardedPerPlayer[HumanPlayerIndex].Count, token);
         }
 
         /// <summary>
@@ -200,7 +205,69 @@ namespace MixVerse.Game
             // Model 側では Draw の時点でペアが捨てられているので、View を追従させる
             await _view.DiscardPairsAsync(result.DrawerIndex, result.DiscardedPair, token);
 
+            // JOKER は誰ともペアにならず手札に残るので、引き当てた CPU はその時点でダメージを受ける
+            if (result.DrawerIndex != HumanPlayerIndex && result.DrawnCard.IsJoker)
+            {
+                await ApplyCpuDamageAsync(result.DrawerIndex, CpuHealth.JokerDamageBase, token);
+            }
+
+            if (result.DrawerIndex == HumanPlayerIndex)
+            {
+                await ApplyPlayerDiscardDamageAsync(result.DiscardedPair.Count, token);
+            }
+
             await _view.WaitAsync(TurnIntervalDuration, token);
+        }
+
+        /// <summary>
+        /// プレイヤーが手札を捨てた直後、それによって手札が CPU より少なくなっていれば、その CPU の体力を減らす。
+        /// 捨てたことで初めて下回った相手だけが対象なので、捨てる前の枚数（捨てた枚数を足し戻したもの）と比べる。
+        /// </summary>
+        /// <param name="discardedCount">プレイヤーがこのタイミングで捨てた枚数。</param>
+        private async UniTask ApplyPlayerDiscardDamageAsync(int discardedCount, CancellationToken token)
+        {
+            if (discardedCount <= 0)
+            {
+                return;
+            }
+
+            var humanCount = _game.Hands[HumanPlayerIndex].Count;
+            var humanCountBeforeDiscard = humanCount + discardedCount;
+
+            for (var playerIndex = 0; playerIndex < _game.PlayerCount; playerIndex++)
+            {
+                if (playerIndex == HumanPlayerIndex)
+                {
+                    continue;
+                }
+
+                var cpuCount = _game.Hands[playerIndex].Count;
+
+                // 捨てる前からすでに下回っていた相手や、捨てても下回らない相手には効かない。
+                // 上がり済み（0枚）の CPU も、下回りようがないのでここで除かれる。
+                if (humanCountBeforeDiscard < cpuCount || humanCount >= cpuCount)
+                {
+                    continue;
+                }
+
+                await ApplyCpuDamageAsync(playerIndex, CpuHealth.HandCountDamageBase, token);
+            }
+        }
+
+        /// <summary>
+        /// CPU の体力を減らす。体力が初めて減った CPU は、グリッチで乱れながら別のキャラクターへ変わる。
+        /// </summary>
+        private async UniTask ApplyCpuDamageAsync(int playerIndex, int damageBase, CancellationToken token)
+        {
+            var wasDamaged = _cpuHealth.IsDamaged(playerIndex);
+
+            _cpuHealth.ApplyDamage(playerIndex, damageBase, _random);
+
+            // 2回目以降は変身済みなので演出は出さない
+            if (!wasDamaged)
+            {
+                await _view.PlayCharacterMorphAsync(playerIndex, token);
+            }
         }
 
         /// <summary>
@@ -222,6 +289,11 @@ namespace MixVerse.Game
         /// </summary>
         public UniTask WaitBeforeReturnToHomeAsync(CancellationToken token)
             => _view.WaitAsync(ResultToHomeDelay, token);
+
+        /// <summary>
+        /// ホーム画面へ戻る際に、この画面を非表示にする。
+        /// </summary>
+        public void HideView() => _view.Hide();
 
         /// <summary>
         /// 引く対象の手札を選べる状態にして、選ばれるまで待つ。

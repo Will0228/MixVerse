@@ -1239,6 +1239,7 @@ MonoBehaviour:
   _discardPile: {fileID: 5184302570911611115}
   _boardCamera: {fileID: 0}
   _clapHandsView: {fileID: 3824199461596820990}
+  _characterMorphs: []
   _bgmSource: {fileID: 5566778899001124}
   _canvasGroup: {fileID: 7845384437874496732}
   _fadeOverlayGroup: {fileID: 789484973931418225}
