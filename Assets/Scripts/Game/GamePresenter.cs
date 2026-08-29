@@ -24,6 +24,12 @@ namespace MixVerse.Game
         /// <summary>SYNC で確定したことを表す番兵。手札インデックスと区別するため負値にする。</summary>
         private const int CursorConfirmed = -1;
 
+        /// <summary>左デッキ（SYNC / CUE）が担当する相手。</summary>
+        private const int LeftDeckPlayerIndex = 1;
+
+        /// <summary>右デッキ（SYNC / CUE）が担当する相手。</summary>
+        private const int RightDeckPlayerIndex = 2;
+
         private readonly GameView _view;
         private readonly OldMaidGame _game;
         private readonly CpuStrategy _cpuStrategy;
@@ -47,10 +53,11 @@ namespace MixVerse.Game
 
         /// <summary>
         /// CUE ボタンで手を出し入れし、表示中はジョグの回転方向で拍手する手を開閉させる。
+        /// 左の CUE で CPU1、右の CUE で CPU2 を向く。正面を向いているときはどちらも受け付ける。
         /// 時計回りで合わせ、反時計回りで放す。手番の進行とは独立して常に受け付けるため、
         /// Controller のライフサイクルに紐づけて一度だけ呼ぶ。
         /// </summary>
-        public void SetupClapGesture(CompositeDisposable disposable)
+        public void SetupClapGesture(CompositeDisposable disposable, CancellationToken token)
         {
             if (_djController == null)
             {
@@ -58,9 +65,23 @@ namespace MixVerse.Game
             }
 
             _djController.OnCuePressed
-                .Subscribe(_ =>
+                .Subscribe(deckSide =>
                 {
-                    _view.ToggleClapHands();
+                    // カード選択中（SYNC でカメラが専用位置にある間）は拍手を受け付けない
+                    if (_view.IsDrawCameraActive)
+                    {
+                        return;
+                    }
+
+                    var targetIndex = GetDeckPlayerIndex(deckSide);
+
+                    // 誰かを向いている間は、その相手の CUE（＝正面に戻す操作）だけを受け付ける
+                    if (_view.IsClapCameraActive && _view.ClapCameraTargetIndex != targetIndex)
+                    {
+                        return;
+                    }
+
+                    _view.ToggleClapCamera(targetIndex, token);
                     _clapGestureDetector.Reset();
                 })
                 .AddTo(disposable);
@@ -157,9 +178,20 @@ namespace MixVerse.Game
             // ① SYNC が押されるまでは手札選択状態に入らない
             _view.ClearSelectable();
             _view.HideArrow();
-            _view.SetTurnText("Your turn - press SYNC to start selecting");
+            _view.SetTurnText("Your turn - press " + GetDeckName(targetIndex) + " SYNC to start selecting");
 
-            await _djController.OnSyncPressed.FirstAsync(token);
+            // CUE で相手を向いて拍手している間は、SYNC を押しても無反応にする。
+            // 真正面に戻る（もう一度 CUE を押す）まで、押された SYNC はここで捨てて待ち続ける。
+            // 引く相手に対応していないデッキの SYNC（CPU1 が残っている間の右 SYNC など）も同じく捨てる。
+            while (true)
+            {
+                var deckSide = await _djController.OnSyncPressed.FirstAsync(token);
+
+                if (!_view.IsClapCameraActive && GetDeckPlayerIndex(deckSide) == targetIndex)
+                {
+                    break;
+                }
+            }
 
             // ② ここから手札選択状態。ジョグを回すたびにカーソルが左右へ動く
             var cardCount = _game.Hands[targetIndex].Count;
@@ -167,7 +199,7 @@ namespace MixVerse.Game
 
             await _view.BeginDrawSelectionAsync(targetIndex, token);
             _view.ShowArrowAt(targetIndex, cursor);
-            _view.SetTurnText("Turn the jog to move - press SYNC to draw from " + GetPlayerName(targetIndex));
+            _view.SetTurnText("Turn the jog to move - press " + GetDeckName(targetIndex) + " SYNC to draw from " + GetPlayerName(targetIndex));
 
             using (_djController.OnJogStep.Subscribe(step =>
                    {
@@ -177,7 +209,9 @@ namespace MixVerse.Game
             {
                 // SYNC をもう一度押すとカーソル位置で確定。マウスクリックでも確定できる。
                 var selectedIndex = await Observable.Merge(
-                        _djController.OnSyncPressed.Select(_ => CursorConfirmed),
+                        _djController.OnSyncPressed
+                            .Where(deckSide => GetDeckPlayerIndex(deckSide) == targetIndex)
+                            .Select(_ => CursorConfirmed),
                         _view.OnCardClicked.Select(card => card.HandIndex))
                     .FirstAsync(token);
 
@@ -238,5 +272,17 @@ namespace MixVerse.Game
 
         private static string GetPlayerName(int playerIndex)
             => playerIndex == HumanPlayerIndex ? "You" : "CPU" + playerIndex;
+
+        /// <summary>
+        /// DJ コントローラーの左右デッキと相手プレイヤーの対応。左が CPU1、右が CPU2。
+        /// </summary>
+        private static int GetDeckPlayerIndex(DjDeckSide deckSide)
+            => deckSide == DjDeckSide.Left ? LeftDeckPlayerIndex : RightDeckPlayerIndex;
+
+        /// <summary>
+        /// 相手プレイヤーを操作するデッキ側の表示名。操作案内のテキストに使う。
+        /// </summary>
+        private static string GetDeckName(int playerIndex)
+            => playerIndex == RightDeckPlayerIndex ? "right" : "left";
     }
 }

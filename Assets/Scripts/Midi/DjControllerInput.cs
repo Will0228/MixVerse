@@ -23,11 +23,17 @@ namespace MixVerse.Midi
         [Tooltip("MIDI チャンネル。表示と同じ 1 始まりで指定する。")]
         [SerializeField] private int _midiChannel = 1;
 
-        [Tooltip("手札選択の開始と確定に使うノート番号（SYNC ボタン）。")]
-        [SerializeField] private int _syncNoteNumber = 71;
+        [Tooltip("手札選択の開始と確定に使うノート番号（左デッキの SYNC ボタン）。")]
+        [SerializeField] private int _leftSyncNoteNumber = 64;
 
-        [Tooltip("拍手する手の呼び出しに使うノート番号（CUE ボタン）。")]
-        [SerializeField] private int _cueNoteNumber = 67;
+        [Tooltip("手札選択の開始と確定に使うノート番号（右デッキの SYNC ボタン）。")]
+        [SerializeField] private int _rightSyncNoteNumber = 71;
+
+        [Tooltip("拍手する手の呼び出しに使うノート番号（左デッキの CUE ボタン）。")]
+        [SerializeField] private int _leftCueNoteNumber = 51;
+
+        [Tooltip("拍手する手の呼び出しに使うノート番号（右デッキの CUE ボタン）。")]
+        [SerializeField] private int _rightCueNoteNumber = 60;
 
         [Tooltip("カーソルを左右に動かすコントロールチェンジ番号（ジョグ）。")]
         [SerializeField] private int _jogControlNumber = 27;
@@ -38,17 +44,17 @@ namespace MixVerse.Midi
         [Header("Debug")]
         [SerializeField] private bool _logToConsole;
 
-        private readonly Subject<Unit> _onSyncPressed = new Subject<Unit>();
-        private readonly Subject<Unit> _onCuePressed = new Subject<Unit>();
+        private readonly Subject<DjDeckSide> _onSyncPressed = new Subject<DjDeckSide>();
+        private readonly Subject<DjDeckSide> _onCuePressed = new Subject<DjDeckSide>();
         private readonly Subject<int> _onJogStep = new Subject<int>();
 
         private readonly Dictionary<MidiDevice, Handlers> _boundDevices = new Dictionary<MidiDevice, Handlers>();
 
-        /// <summary>SYNC ボタンが押された。</summary>
-        public Observable<Unit> OnSyncPressed => _onSyncPressed;
+        /// <summary>SYNC ボタンが押された。値は押されたデッキ（左右）。</summary>
+        public Observable<DjDeckSide> OnSyncPressed => _onSyncPressed;
 
-        /// <summary>CUE ボタンが押された。</summary>
-        public Observable<Unit> OnCuePressed => _onCuePressed;
+        /// <summary>CUE ボタンが押された。値は押されたデッキ（左右）。</summary>
+        public Observable<DjDeckSide> OnCuePressed => _onCuePressed;
 
         /// <summary>スクラッチが回された。+1 が右、-1 が左。</summary>
         public Observable<int> OnJogStep => _onJogStep;
@@ -141,26 +147,47 @@ namespace MixVerse.Midi
         private void OnNoteOn(int noteNumber, float velocity)
         {
             // Minis はベロシティ0を NoteOff として扱うため、ここに来た時点で押下とみなせる
-            if (noteNumber == _syncNoteNumber)
+            if (TryGetDeckSide(noteNumber, _leftSyncNoteNumber, _rightSyncNoteNumber, out var syncSide))
             {
                 if (_logToConsole)
                 {
-                    Debug.Log($"[DJ] SYNC pressed (note {noteNumber}, velocity {velocity:0.000})");
+                    Debug.Log($"[DJ] SYNC pressed ({syncSide}, note {noteNumber}, velocity {velocity:0.000})");
                 }
 
-                _onSyncPressed.OnNext(Unit.Default);
+                _onSyncPressed.OnNext(syncSide);
                 return;
             }
 
-            if (noteNumber == _cueNoteNumber)
+            if (TryGetDeckSide(noteNumber, _leftCueNoteNumber, _rightCueNoteNumber, out var cueSide))
             {
                 if (_logToConsole)
                 {
-                    Debug.Log($"[DJ] CUE pressed (note {noteNumber}, velocity {velocity:0.000})");
+                    Debug.Log($"[DJ] CUE pressed ({cueSide}, note {noteNumber}, velocity {velocity:0.000})");
                 }
 
-                _onCuePressed.OnNext(Unit.Default);
+                _onCuePressed.OnNext(cueSide);
             }
+        }
+
+        /// <summary>
+        /// ノート番号が左右どちらのデッキのボタンかを判定する。どちらでもなければ false。
+        /// </summary>
+        private static bool TryGetDeckSide(int noteNumber, int leftNoteNumber, int rightNoteNumber, out DjDeckSide side)
+        {
+            if (noteNumber == leftNoteNumber)
+            {
+                side = DjDeckSide.Left;
+                return true;
+            }
+
+            if (noteNumber == rightNoteNumber)
+            {
+                side = DjDeckSide.Right;
+                return true;
+            }
+
+            side = default;
+            return false;
         }
 
         private void OnControlChange(int controlNumber, float value)

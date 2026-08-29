@@ -15,6 +15,9 @@ namespace MixVerse.Game
     /// </summary>
     public sealed class GameView : MonoBehaviour
     {
+        /// <summary>CUE でどの相手も向いていない（正面を向いている）ことを表す番兵。</summary>
+        private const int NoClapCameraTarget = -1;
+
         [Header("Board")]
         [SerializeField] private CardView _cardPrefab;
         [SerializeField] private HandView[] _handViews;
@@ -60,6 +63,11 @@ namespace MixVerse.Game
         private Vector3 _drawCameraHomePosition;
         private Quaternion _drawCameraHomeRotation;
         private Quaternion _drawHandHomeRotation;
+
+        // CUE ボタンで相手向きに寄せている間の状態。ToggleClapCamera で開始・終了を切り替える。
+        // 正面を向いている間は -1。
+        private int _clapCameraTargetIndex = NoClapCameraTarget;
+        private CancellationTokenSource _clapCameraCts;
 
         /// <summary>捨て札置き場に積まれた枚数。積み上げる高さの計算に使う。</summary>
         private int _discardStackCount;
@@ -348,11 +356,78 @@ namespace MixVerse.Game
         /// <summary>CUE ボタンで拍手する手が表示中か。</summary>
         public bool IsClapHandsVisible => _clapHandsView != null && _clapHandsView.IsVisible;
 
-        /// <summary>拍手する手の表示・非表示を切り替える。</summary>
-        public void ToggleClapHands() => _clapHandsView?.Toggle();
+        /// <summary>カード選択中（SYNC でカメラが専用位置にある間）か。CUE を受け付けるかの判定に使う。</summary>
+        public bool IsDrawCameraActive => _activeDrawCameraHand != null;
+
+        /// <summary>CUE でカメラが相手向きになっているか。SYNC を受け付けるかの判定に使う。</summary>
+        public bool IsClapCameraActive => _clapCameraTargetIndex != NoClapCameraTarget;
+
+        /// <summary>CUE で向いている相手のプレイヤー番号。正面を向いていれば -1。</summary>
+        public int ClapCameraTargetIndex => _clapCameraTargetIndex;
+
+        /// <summary>
+        /// CUE ボタンで、カメラを対象プレイヤーの手札用位置（カード選択時と同じ DrawCameraPoint）へ
+        /// 移動しつつ拍手する手を出す。同じ相手に対してもう一度呼ぶと真正面へ戻す。
+        /// カード選択中は Presenter 側で呼び出さないようにガードしてもらう想定。
+        /// </summary>
+        public void ToggleClapCamera(int targetIndex, CancellationToken token)
+        {
+            // 同じ相手を向いている状態で押されたら正面へ戻す
+            var isTurningToTarget = _clapCameraTargetIndex != targetIndex;
+            _clapCameraTargetIndex = isTurningToTarget ? targetIndex : NoClapCameraTarget;
+
+            _clapCameraCts?.Cancel();
+            _clapCameraCts?.Dispose();
+            _clapCameraCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+
+            if (isTurningToTarget)
+            {
+                var point = GetClapCameraPoint(targetIndex);
+                _clapHandsView?.Show();
+                PlayClapCameraAsync(point, _clapCameraCts.Token).Forget();
+            }
+            else
+            {
+                _clapHandsView?.Hide();
+                PlayClapCameraAsync(_defaultCameraPoint, _clapCameraCts.Token).Forget();
+            }
+        }
+
+        /// <summary>
+        /// 拍手時に向く先。カード選択時と同じく、対象プレイヤーの手札に設定された DrawCameraPoint を使う。
+        /// </summary>
+        private Transform GetClapCameraPoint(int targetIndex)
+        {
+            if (targetIndex < 0 || targetIndex >= _handViews.Length)
+            {
+                return null;
+            }
+
+            return _handViews[targetIndex].DrawCameraPoint;
+        }
 
         /// <summary>スクラッチの回転方向に合わせて、拍手する手を閉じる（時計回り）か開く（反時計回り）かを切り替える。</summary>
         public void SetHandsClosed(bool isClosed) => _clapHandsView?.SetHandsClosed(isClosed);
+
+        /// <summary>
+        /// カメラを指定位置へ移動させる。位置が未設定、または演出タイミングが未設定なら何もしない。
+        /// </summary>
+        private async UniTask PlayClapCameraAsync(Transform point, CancellationToken token)
+        {
+            if (point == null || _drawCameraSettings == null)
+            {
+                return;
+            }
+
+            try
+            {
+                await TweenUtility.MoveAsync(BoardCamera.transform, point.position, point.rotation, _drawCameraSettings.TransitionDuration, token);
+            }
+            catch (System.OperationCanceledException)
+            {
+                // 連打などで次の切り替えに割り込まれた場合はここに来る
+            }
+        }
 
         /// <summary>
         /// 捨て札置き場での位置。中心から少しずらしつつ、積むほど高くする。
@@ -438,6 +513,9 @@ namespace MixVerse.Game
         {
             _cardSubscriptions.Dispose();
             _onCardClicked.Dispose();
+
+            _clapCameraCts?.Cancel();
+            _clapCameraCts?.Dispose();
         }
     }
 }
