@@ -21,7 +21,7 @@ namespace MixVerse.Game
         private const float CpuShowSelectionDuration = 0.5f;
         private const float TurnIntervalDuration = 0.2f;
 
-        /// <summary>SYNC で確定したことを表す番兵。手札インデックスと区別するため負値にする。</summary>
+        /// <summary>SYNC が押されたことを表す番兵。手札インデックスと区別するため負値にする。</summary>
         private const int CursorConfirmed = -1;
 
         /// <summary>左デッキ（SYNC / CUE）が担当する相手。</summary>
@@ -164,8 +164,10 @@ namespace MixVerse.Game
         }
 
         /// <summary>
-        /// 引く対象の手札をクリックできるようにして、選ばれるまで待つ。
-        /// カーソルを乗せたカードの上には View 側で矢印が表示される。
+        /// 引く対象の手札を選べる状態にして、選ばれるまで待つ。
+        /// SYNC で選択を始めると画面のランダムな位置に照準が出るので、
+        /// 担当デッキのツマミで動かし、カードに重ねた状態で SYNC を押すと引ける。
+        /// 狙っているカードの上には View 側で矢印が表示される。
         /// </summary>
         private async UniTask<int> WaitForHumanSelectionAsync(int targetIndex, CancellationToken token)
         {
@@ -193,32 +195,58 @@ namespace MixVerse.Game
                 }
             }
 
-            // ② ここから手札選択状態。ジョグを回すたびにカーソルが左右へ動く
-            var cardCount = _game.Hands[targetIndex].Count;
-            var cursor = 0;
-
+            // ② ここから手札選択状態。画面のランダムな位置に照準が出るので、
+            //    ツマミで動かして狙ったカードに重ねる
             await _view.BeginDrawSelectionAsync(targetIndex, token);
-            _view.ShowArrowAt(targetIndex, cursor);
-            _view.SetTurnText("Turn the jog to move - press " + GetDeckName(targetIndex) + " SYNC to draw from " + GetPlayerName(targetIndex));
 
-            using (_djController.OnJogStep.Subscribe(step =>
-                   {
-                       cursor = WrapIndex(cursor + step, cardCount);
-                       _view.ShowArrowAt(targetIndex, cursor);
-                   }))
+            _view.HideArrow();
+            _view.ShowTargetCursor();
+            _view.SetTurnText("Turn the knobs to aim - press " + GetDeckName(targetIndex) + " SYNC on a card to draw from " + GetPlayerName(targetIndex));
+
+            using (_djController.OnCursorStep
+                       .Where(cursorStep => GetDeckPlayerIndex(cursorStep.DeckSide) == targetIndex)
+                       .Subscribe(cursorStep =>
+                       {
+                           _view.MoveTargetCursor(cursorStep.Delta);
+
+                           // 重なっていなければ範囲外のインデックスになり、View 側で矢印が消える
+                           _view.ShowArrowAt(targetIndex, _view.GetTargetedCardIndex(targetIndex));
+                       }))
             {
-                // SYNC をもう一度押すとカーソル位置で確定。マウスクリックでも確定できる。
-                var selectedIndex = await Observable.Merge(
-                        _djController.OnSyncPressed
-                            .Where(deckSide => GetDeckPlayerIndex(deckSide) == targetIndex)
-                            .Select(_ => CursorConfirmed),
-                        _view.OnCardClicked.Select(card => card.HandIndex))
-                    .FirstAsync(token);
+                // SYNC で確定。マウスクリックでも確定できる。
+                var confirmations = Observable.Merge(
+                    _djController.OnSyncPressed
+                        .Where(deckSide => GetDeckPlayerIndex(deckSide) == targetIndex)
+                        .Select(_ => CursorConfirmed),
+                    _view.OnCardClicked.Select(card => card.HandIndex));
+
+                int selectedIndex;
+
+                while (true)
+                {
+                    var confirmed = await confirmations.FirstAsync(token);
+
+                    if (confirmed != CursorConfirmed)
+                    {
+                        selectedIndex = confirmed;
+                        break;
+                    }
+
+                    // 照準がカードに重なっていない間は、SYNC を押しても引けない
+                    var targeted = _view.GetTargetedCardIndex(targetIndex);
+
+                    if (targeted != GameView.NoTargetedCard)
+                    {
+                        selectedIndex = targeted;
+                        break;
+                    }
+                }
 
                 _view.ClearSelectable();
                 _view.HideArrow();
+                _view.HideTargetCursor();
 
-                return selectedIndex == CursorConfirmed ? cursor : selectedIndex;
+                return selectedIndex;
             }
         }
 
@@ -236,19 +264,6 @@ namespace MixVerse.Game
             _view.HideArrow();
 
             return selected.HandIndex;
-        }
-
-        /// <summary>
-        /// カーソルを手札の端で反対側へ回り込ませる。
-        /// </summary>
-        private static int WrapIndex(int index, int count)
-        {
-            if (count <= 0)
-            {
-                return 0;
-            }
-
-            return ((index % count) + count) % count;
         }
 
         /// <summary>

@@ -18,6 +18,9 @@ namespace MixVerse.Game
         /// <summary>CUE でどの相手も向いていない（正面を向いている）ことを表す番兵。</summary>
         private const int NoClapCameraTarget = -1;
 
+        /// <summary>照準がどのカードにも重なっていないことを表す番兵。</summary>
+        public const int NoTargetedCard = -1;
+
         [Header("Board")]
         [SerializeField] private CardView _cardPrefab;
         [SerializeField] private HandView[] _handViews;
@@ -33,6 +36,7 @@ namespace MixVerse.Game
         // 3D の盤面は CanvasGroup ではフェードできないため、画面全体を覆う黒板を別に用意する
         [SerializeField] private CanvasGroup _fadeOverlayGroup;
         [SerializeField] private SelectionArrowView _selectionArrow;
+        [SerializeField] private TargetCursorView _targetCursor;
         [SerializeField] private TextMeshProUGUI _turnLabel;
         [SerializeField] private TextMeshProUGUI _resultLabel;
 
@@ -57,10 +61,10 @@ namespace MixVerse.Game
         private readonly CompositeDisposable _cardSubscriptions = new CompositeDisposable();
         private readonly List<CardView> _spawnedCards = new List<CardView>();
 
-        // 選択可能になった瞬間からカードが自分の手札に加わるまでカメラを専用位置に置いておくための状態。
+        // 選択可能になった瞬間からカードが自分の手札に加わるまでカメラを専用向きに保つための状態。
         // BeginDrawSelectionAsync で開始し、PlayDrawAsync 側で終了させる。
+        // カメラの位置は常に固定なので、戻す先として向きだけ覚えておく。
         private HandView _activeDrawCameraHand;
-        private Vector3 _drawCameraHomePosition;
         private Quaternion _drawCameraHomeRotation;
         private Quaternion _drawHandHomeRotation;
 
@@ -95,6 +99,11 @@ namespace MixVerse.Game
             {
                 _selectionArrow.Initialize(BoardCamera);
                 _selectionArrow.Hide();
+            }
+
+            if (_targetCursor != null)
+            {
+                _targetCursor.Hide();
             }
 
             if (_resultLabel != null)
@@ -213,12 +222,12 @@ namespace MixVerse.Game
 
             await cardView.PlayDissolveOutAsync(token);
 
-            // 選択可能になった瞬間から寄せていたカメラは、カードが消えているこの間に戻す。
+            // 選択可能になった瞬間から向けていたカメラは、カードが消えているこの間に戻す。
             // 実体化を引いた側の手札で見せたいので、カメラを戻すのはディゾルブインより前。
             if (_activeDrawCameraHand == fromHand)
             {
                 _activeDrawCameraHand = null;
-                await PlayDrawCameraOutAsync(fromHand, _drawCameraHomePosition, _drawCameraHomeRotation, _drawHandHomeRotation, token);
+                await PlayDrawCameraOutAsync(fromHand, _drawCameraHomeRotation, _drawHandHomeRotation, token);
             }
 
             // 移動と表裏の切り替えも消えている間に済ませるので、
@@ -236,8 +245,9 @@ namespace MixVerse.Game
         }
 
         /// <summary>
-        /// 引く対象の手札を選択可能にする。専用カメラ位置が設定されていれば、
-        /// そこに寄せつつ手札をこちらへ向け、カードが引かれて自分の手札に加わるまでその位置を保つ。
+        /// 引く対象の手札を選択可能にする。専用カメラ向きが設定されていれば、
+        /// カメラの位置は固定したままそちらへ向け、手札もこちらへ向ける。
+        /// カードが引かれて自分の手札に加わるまでその向きを保つ。
         /// </summary>
         public async UniTask BeginDrawSelectionAsync(int targetIndex, CancellationToken token)
         {
@@ -252,17 +262,9 @@ namespace MixVerse.Game
 
             _activeDrawCameraHand = hand;
 
-            if (_defaultCameraPoint != null)
-            {
-                _drawCameraHomePosition = _defaultCameraPoint.position;
-                _drawCameraHomeRotation = _defaultCameraPoint.rotation;
-            }
-            else
-            {
-                var cameraTransform = BoardCamera.transform;
-                _drawCameraHomePosition = cameraTransform.position;
-                _drawCameraHomeRotation = cameraTransform.rotation;
-            }
+            _drawCameraHomeRotation = _defaultCameraPoint != null
+                ? _defaultCameraPoint.rotation
+                : BoardCamera.transform.rotation;
 
             _drawHandHomeRotation = hand.transform.localRotation;
 
@@ -270,25 +272,25 @@ namespace MixVerse.Game
         }
 
         /// <summary>
-        /// カメラを相手の手札の専用位置へ寄せつつ、その手札をこちらへ向ける。
+        /// カメラの位置は変えずに相手の手札の専用向きへ向けつつ、その手札をこちらへ向ける。
         /// </summary>
         private UniTask PlayDrawCameraInAsync(HandView fromHand, CancellationToken token)
         {
             var point = fromHand.DrawCameraPoint;
 
             return UniTask.WhenAll(
-                TweenUtility.MoveAsync(BoardCamera.transform, point.position, point.rotation, _drawCameraSettings.TransitionDuration, token),
+                TweenUtility.RotateAsync(BoardCamera.transform, point.rotation, _drawCameraSettings.TransitionDuration, token),
                 TweenUtility.MoveLocalAsync(fromHand.transform, fromHand.transform.localPosition, fromHand.DrawFacingRotation, _drawCameraSettings.TransitionDuration, token));
         }
 
         /// <summary>
-        /// カメラと相手の手札を、演出前の位置・向きへ戻す。
+        /// カメラと相手の手札を、演出前の向きへ戻す。カメラの位置は動かさない。
         /// </summary>
         private UniTask PlayDrawCameraOutAsync(
-            HandView fromHand, Vector3 cameraPosition, Quaternion cameraRotation, Quaternion handRotation, CancellationToken token)
+            HandView fromHand, Quaternion cameraRotation, Quaternion handRotation, CancellationToken token)
         {
             return UniTask.WhenAll(
-                TweenUtility.MoveAsync(BoardCamera.transform, cameraPosition, cameraRotation, _drawCameraSettings.TransitionDuration, token),
+                TweenUtility.RotateAsync(BoardCamera.transform, cameraRotation, _drawCameraSettings.TransitionDuration, token),
                 TweenUtility.MoveLocalAsync(fromHand.transform, fromHand.transform.localPosition, handRotation, _drawCameraSettings.TransitionDuration, token));
         }
 
@@ -332,6 +334,44 @@ namespace MixVerse.Game
 
         public void HideArrow() => _selectionArrow?.Hide();
 
+        /// <summary>
+        /// 引くカードを狙う照準を、画面内のランダムな位置に出す。
+        /// </summary>
+        public void ShowTargetCursor() => _targetCursor?.Show(BoardCamera);
+
+        public void HideTargetCursor() => _targetCursor?.Hide();
+
+        /// <summary>
+        /// 照準をツマミ1ステップ分だけ動かす。delta は +X が右、+Y が上。
+        /// </summary>
+        public void MoveTargetCursor(Vector2 delta) => _targetCursor?.Move(delta);
+
+        /// <summary>
+        /// 照準が重なっているカードの、指定した手札の中での位置。
+        /// その手札のカードに重なっていなければ NoTargetedCard。
+        /// </summary>
+        public int GetTargetedCardIndex(int playerIndex)
+        {
+            var targeted = _targetCursor != null ? _targetCursor.Raycast() : null;
+
+            if (targeted == null || playerIndex < 0 || playerIndex >= _handViews.Length)
+            {
+                return NoTargetedCard;
+            }
+
+            var cards = _handViews[playerIndex].Cards;
+
+            for (var i = 0; i < cards.Count; i++)
+            {
+                if (cards[i] == targeted)
+                {
+                    return i;
+                }
+            }
+
+            return NoTargetedCard;
+        }
+
         public void SetTurnText(string text)
         {
             if (_turnLabel != null)
@@ -366,8 +406,9 @@ namespace MixVerse.Game
         public int ClapCameraTargetIndex => _clapCameraTargetIndex;
 
         /// <summary>
-        /// CUE ボタンで、カメラを対象プレイヤーの手札用位置（カード選択時と同じ DrawCameraPoint）へ
-        /// 移動しつつ拍手する手を出す。同じ相手に対してもう一度呼ぶと真正面へ戻す。
+        /// CUE ボタンで、カメラの位置は固定したまま対象プレイヤーの手札用向き
+        /// （カード選択時と同じ DrawCameraPoint）へ向けつつ拍手する手を出す。
+        /// 同じ相手に対してもう一度呼ぶと真正面へ戻す。
         /// カード選択中は Presenter 側で呼び出さないようにガードしてもらう想定。
         /// </summary>
         public void ToggleClapCamera(int targetIndex, CancellationToken token)
@@ -410,7 +451,7 @@ namespace MixVerse.Game
         public void SetHandsClosed(bool isClosed) => _clapHandsView?.SetHandsClosed(isClosed);
 
         /// <summary>
-        /// カメラを指定位置へ移動させる。位置が未設定、または演出タイミングが未設定なら何もしない。
+        /// カメラの位置は変えずに指定の向きへ回す。向きが未設定、または演出タイミングが未設定なら何もしない。
         /// </summary>
         private async UniTask PlayClapCameraAsync(Transform point, CancellationToken token)
         {
@@ -421,7 +462,7 @@ namespace MixVerse.Game
 
             try
             {
-                await TweenUtility.MoveAsync(BoardCamera.transform, point.position, point.rotation, _drawCameraSettings.TransitionDuration, token);
+                await TweenUtility.RotateAsync(BoardCamera.transform, point.rotation, _drawCameraSettings.TransitionDuration, token);
             }
             catch (System.OperationCanceledException)
             {

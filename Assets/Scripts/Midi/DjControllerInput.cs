@@ -41,12 +41,29 @@ namespace MixVerse.Midi
         [Tooltip("この生の MIDI 値(0〜127)なら右へ、それ以外なら左へ動かす。")]
         [SerializeField] private int _jogRightRawValue = 1;
 
+        [Header("Cursor Knobs")]
+        [Tooltip("CPU1 の照準を上下に動かすコントロールチェンジ番号（左デッキのツマミ）。")]
+        [SerializeField] private int _leftCursorVerticalControlNumber = 27;
+
+        [Tooltip("CPU1 の照準を左右に動かすコントロールチェンジ番号（左デッキのツマミ）。")]
+        [SerializeField] private int _leftCursorHorizontalControlNumber = 28;
+
+        [Tooltip("CPU2 の照準を上下に動かすコントロールチェンジ番号（右デッキのツマミ）。")]
+        [SerializeField] private int _rightCursorVerticalControlNumber = 32;
+
+        [Tooltip("CPU2 の照準を左右に動かすコントロールチェンジ番号（右デッキのツマミ）。")]
+        [SerializeField] private int _rightCursorHorizontalControlNumber = 31;
+
+        [Tooltip("この生の MIDI 値(0〜127)なら時計回り（下・右）、それ以外なら反時計回り（上・左）とみなす。")]
+        [SerializeField] private int _cursorClockwiseRawValue = 1;
+
         [Header("Debug")]
         [SerializeField] private bool _logToConsole;
 
         private readonly Subject<DjDeckSide> _onSyncPressed = new Subject<DjDeckSide>();
         private readonly Subject<DjDeckSide> _onCuePressed = new Subject<DjDeckSide>();
         private readonly Subject<int> _onJogStep = new Subject<int>();
+        private readonly Subject<DjCursorStep> _onCursorStep = new Subject<DjCursorStep>();
 
         private readonly Dictionary<MidiDevice, Handlers> _boundDevices = new Dictionary<MidiDevice, Handlers>();
 
@@ -58,6 +75,9 @@ namespace MixVerse.Midi
 
         /// <summary>スクラッチが回された。+1 が右、-1 が左。</summary>
         public Observable<int> OnJogStep => _onJogStep;
+
+        /// <summary>照準用のツマミが回された。どちらのデッキかと画面上の移動方向を持つ。</summary>
+        public Observable<DjCursorStep> OnCursorStep => _onCursorStep;
 
         private sealed class Handlers
         {
@@ -92,6 +112,7 @@ namespace MixVerse.Midi
             _onSyncPressed.Dispose();
             _onCuePressed.Dispose();
             _onJogStep.Dispose();
+            _onCursorStep.Dispose();
         }
 
         private void OnDeviceChange(InputDevice device, InputDeviceChange change)
@@ -192,23 +213,73 @@ namespace MixVerse.Midi
 
         private void OnControlChange(int controlNumber, float value)
         {
-            if (controlNumber != _jogControlNumber)
-            {
-                return;
-            }
-
             // 正規化された値を生の MIDI 値に戻して判定する。
             // ロータリーエンコーダは「右回りで 1、左回りで 127」のように
             // 値そのもので方向を表すことが多いため、しきい値ではなく一致で見る。
             var rawValue = Mathf.RoundToInt(value * MidiValueScale);
-            var step = rawValue == _jogRightRawValue ? 1 : -1;
 
-            if (_logToConsole)
+            if (controlNumber == _jogControlNumber)
             {
-                Debug.Log($"[DJ] Jog cc{controlNumber} raw={rawValue} step={step}");
+                var step = rawValue == _jogRightRawValue ? 1 : -1;
+
+                if (_logToConsole)
+                {
+                    Debug.Log($"[DJ] Jog cc{controlNumber} raw={rawValue} step={step}");
+                }
+
+                _onJogStep.OnNext(step);
             }
 
-            _onJogStep.OnNext(step);
+            // ジョグと照準のツマミに同じ番号を割り当てることもあるため、どちらも続けて判定する
+            if (TryGetCursorStep(controlNumber, rawValue, out var cursorStep))
+            {
+                if (_logToConsole)
+                {
+                    Debug.Log($"[DJ] Cursor cc{controlNumber} raw={rawValue} deck={cursorStep.DeckSide} delta={cursorStep.Delta}");
+                }
+
+                _onCursorStep.OnNext(cursorStep);
+            }
+        }
+
+        /// <summary>
+        /// コントロールチェンジ番号が照準用のツマミかを判定し、画面上の移動方向へ変換する。
+        /// 時計回りで下・右、反時計回りで上・左。どのツマミでもなければ false。
+        /// </summary>
+        private bool TryGetCursorStep(int controlNumber, int rawValue, out DjCursorStep cursorStep)
+        {
+            var isClockwise = rawValue == _cursorClockwiseRawValue;
+
+            // 画面座標は上が +Y なので、時計回り（下移動）は -Y になる
+            var vertical = new Vector2(0f, isClockwise ? -1f : 1f);
+            var horizontal = new Vector2(isClockwise ? 1f : -1f, 0f);
+
+            if (controlNumber == _leftCursorVerticalControlNumber)
+            {
+                cursorStep = new DjCursorStep(DjDeckSide.Left, vertical);
+                return true;
+            }
+
+            if (controlNumber == _leftCursorHorizontalControlNumber)
+            {
+                cursorStep = new DjCursorStep(DjDeckSide.Left, horizontal);
+                return true;
+            }
+
+            if (controlNumber == _rightCursorVerticalControlNumber)
+            {
+                cursorStep = new DjCursorStep(DjDeckSide.Right, vertical);
+                return true;
+            }
+
+            if (controlNumber == _rightCursorHorizontalControlNumber)
+            {
+                cursorStep = new DjCursorStep(DjDeckSide.Right, horizontal);
+                return true;
+            }
+
+            cursorStep = default;
+            return false;
         }
     }
 }
