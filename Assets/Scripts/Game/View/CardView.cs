@@ -19,9 +19,8 @@ namespace MixVerse.Game.View
         /// </summary>
         public static readonly Quaternion FaceDownFlip = Quaternion.Euler(0f, 180f, 0f);
 
-        // カードは CardDissolveShader で描く。絵柄もディゾルブ量もそのプロパティ名に合わせる。
+        // カードは CardDissolveShader で描く。絵柄のプロパティ名もそれに合わせる。
         private static readonly int MainTexPropertyId = Shader.PropertyToID("_MainTex");
-        private static readonly int DissolveThresholdPropertyId = Shader.PropertyToID("_Threshold");
 
         [SerializeField] private MeshRenderer _faceRenderer;
         [SerializeField] private MeshRenderer _backRenderer;
@@ -34,13 +33,20 @@ namespace MixVerse.Game.View
         [SerializeField] private float _faceUpTiltAngle;
 
         [Header("Draw Animation")]
-        // 引かれたカードは溶けて消えている間に移動するため、移動そのものの演出時間は持たない
-        [SerializeField] private float _liftHeight = 0.8f;
-        [SerializeField] private float _liftDuration = 0.15f;
+        // 引かれたカードは真上へ抜けていき、引いた側の手札へ真上から降りてくる。
+        // 抜ける高さは、カメラの画角から出るだけの余裕を持たせておく。
+        [SerializeField] private float _flyOutHeight = 4f;
+        [SerializeField] private float _flyOutDuration = 0.16f;
+        [SerializeField] private float _flyInHeight = 4f;
+        [SerializeField] private float _flyInDuration = 0.2f;
 
-        [Header("Dissolve")]
-        [SerializeField] private float _dissolveOutDuration = 0.35f;
-        [SerializeField] private float _dissolveInDuration = 0.35f;
+        [Header("After Image")]
+        // 残像の枚数と、姿勢を記録する間隔（秒）。間隔が小さいほど尾が詰まる。
+        [SerializeField] private int _afterImageCount = 6;
+        [SerializeField] private float _afterImageInterval = 0.016f;
+        // 残像がいちばん濃くなる速さ（ワールド単位/秒）。これより遅ければ薄くなり、止まっていれば出ない。
+        [SerializeField] private float _afterImageReferenceSpeed = 18f;
+        [SerializeField] private float _afterImageMaxAlpha = 0.65f;
 
         [Header("Discard Toss")]
         [SerializeField] private float _tossDuration = 0.45f;
@@ -54,8 +60,10 @@ namespace MixVerse.Game.View
         private readonly Subject<CardView> _onClicked = new Subject<CardView>();
 
         private MaterialPropertyBlock _facePropertyBlock;
-        private MaterialPropertyBlock _backPropertyBlock;
         private Vector3? _faceLocalDirection;
+
+        // 引かれるときだけ使う残像。使い始めるまでは作らない。
+        private CardAfterImage _afterImage;
 
         /// <summary>カーソルが乗った。矢印 UI の表示に使う。</summary>
         public Observable<CardView> OnPointerEntered => _onPointerEntered;
@@ -200,64 +208,113 @@ namespace MixVerse.Game.View
         }
 
         /// <summary>
-        /// 引かれる演出の前半。少し上に浮いてから、その場で溶けて消える。
-        /// 消えている間に呼び出し側が移動と表裏の切り替えを済ませ、PlayDissolveInAsync で実体化させる。
+        /// 引かれる演出の前半。素早く真上へ抜けていく。抜けきったところで見えなくなるので、
+        /// 呼び出し側はその間に移動と表裏の切り替えを済ませ、PlayFlyInAsync で降ろす。
         /// </summary>
-        public async UniTask PlayDissolveOutAsync(CancellationToken token)
+        public async UniTask PlayFlyOutAsync(CancellationToken token)
         {
-            var lifted = transform.position + Vector3.up * _liftHeight;
+            var lifted = transform.position + (Vector3.up * _flyOutHeight);
 
-            await TweenUtility.MoveAsync(transform, lifted, _liftDuration, token);
-            await PlayDissolveAsync(0f, 1f, _dissolveOutDuration, token);
+            SetAfterImageActive(true);
+
+            try
+            {
+                await TweenUtility.MoveAsync(transform, lifted, _flyOutDuration, TweenEase.AccelerateIn, token);
+            }
+            finally
+            {
+                SetAfterImageActive(false);
+            }
+
+            // 画角からは外れている高さだが、抜けたあとも描かれたままだと
+            // 手札の向き直しを待つ間ずっと宙に浮いて見えてしまうので消しておく。
+            SetVisible(false);
         }
 
         /// <summary>
-        /// 消えた状態から実体化する演出。引いた側の手札へ加えたあとに呼ぶ。
+        /// 引かれる演出の後半。指定したワールド座標の真上から素早く降りてくる。
         /// </summary>
-        public async UniTask PlayDissolveInAsync(CancellationToken token)
+        public async UniTask PlayFlyInAsync(Vector3 worldPosition, CancellationToken token)
         {
-            await PlayDissolveAsync(1f, 0f, _dissolveInDuration, token);
+            transform.position = worldPosition + (Vector3.up * _flyInHeight);
+            SetVisible(true);
 
-            // 溶けている間は隠していた文字を、表裏の状態に応じて戻す
-            SetFaceUpVisibility(IsFaceUp);
+            SetAfterImageActive(true);
+
+            try
+            {
+                await TweenUtility.MoveAsync(transform, worldPosition, _flyInDuration, TweenEase.DecelerateOut, token);
+            }
+            finally
+            {
+                SetAfterImageActive(false);
+            }
         }
 
         /// <summary>
-        /// ディゾルブ量を即座に設定する。0 が実体、1 が完全に消えた状態。
+        /// 描画のオン・オフ。移動の途中で見せたくない区間に使う。
         /// </summary>
-        public void SetDissolveAmount(float amount)
+        public void SetVisible(bool visible)
         {
-            SetDissolveAmount(_faceRenderer, ref _facePropertyBlock, amount);
-            SetDissolveAmount(_backRenderer, ref _backPropertyBlock, amount);
-        }
+            if (_faceRenderer != null)
+            {
+                _faceRenderer.enabled = visible;
+            }
 
-        private UniTask PlayDissolveAsync(float from, float to, float duration, CancellationToken token)
-        {
-            // 文字は TMP 側のシェーダーで描かれるためディゾルブしない。溶けている間は消しておく。
+            if (_backRenderer != null)
+            {
+                _backRenderer.enabled = visible;
+            }
+
+            // 文字は表向きのときだけ出す。裏向きで出すと透けて見えてしまう。
             if (_faceLabel != null)
             {
-                _faceLabel.enabled = false;
+                _faceLabel.enabled = visible && IsFaceUp;
             }
-
-            return TweenUtility.ValueAsync(from, to, duration, token, SetDissolveAmount);
         }
 
         /// <summary>
-        /// マテリアルを複製すると全カードで共有されなくなるうえ枚数分の実体ができるため、
-        /// SetFaceSprite と同じく MaterialPropertyBlock でカードごとに上書きする。
+        /// 残像の表示を切り替える。使い始めるまで実体は作らない。
         /// </summary>
-        private static void SetDissolveAmount(MeshRenderer meshRenderer, ref MaterialPropertyBlock propertyBlock, float amount)
+        private void SetAfterImageActive(bool active)
         {
-            if (meshRenderer == null)
+            if (_afterImage == null)
             {
-                return;
+                if (!active)
+                {
+                    return;
+                }
+
+                _afterImage = new CardAfterImage(
+                    transform,
+                    GetVisualRenderers(),
+                    _afterImageCount,
+                    _afterImageInterval,
+                    _afterImageReferenceSpeed,
+                    _afterImageMaxAlpha);
             }
 
-            propertyBlock ??= new MaterialPropertyBlock();
+            _afterImage.SetActive(active);
+        }
 
-            meshRenderer.GetPropertyBlock(propertyBlock);
-            propertyBlock.SetFloat(DissolveThresholdPropertyId, amount);
-            meshRenderer.SetPropertyBlock(propertyBlock);
+        /// <summary>
+        /// 残像の元にする板。表と裏をそのまま複製する。
+        /// </summary>
+        private MeshRenderer[] GetVisualRenderers()
+        {
+            if (_faceRenderer != null && _backRenderer != null)
+            {
+                return new[] { _faceRenderer, _backRenderer };
+            }
+
+            var single = _faceRenderer != null ? _faceRenderer : _backRenderer;
+            return single != null ? new[] { single } : System.Array.Empty<MeshRenderer>();
+        }
+
+        private void LateUpdate()
+        {
+            // 移動はトゥイーンが Update で書くので、その結果の姿勢を残像に記録するのは LateUpdate。
+            _afterImage?.Tick(Time.deltaTime);
         }
 
         /// <summary>
@@ -301,6 +358,8 @@ namespace MixVerse.Game.View
 
         private void OnDestroy()
         {
+            _afterImage?.Dispose();
+
             _onPointerEntered.Dispose();
             _onPointerExited.Dispose();
             _onClicked.Dispose();

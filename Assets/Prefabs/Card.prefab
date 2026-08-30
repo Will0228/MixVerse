@@ -197,7 +197,7 @@ MonoBehaviour:
   m_fontMaterials: []
   m_fontColor32:
     serializedVersion: 2
-    rgba: 4294967295
+    rgba: 4280557343
   m_fontColor: {r: 0.12, g: 0.12, b: 0.14, a: 1}
   m_enableVertexGradient: 0
   m_colorMode: 3
@@ -210,7 +210,7 @@ MonoBehaviour:
   m_spriteAsset: {fileID: 0}
   m_tintAllSprites: 0
   m_StyleSheet: {fileID: 0}
-  m_TextStyleHashCode: 0
+  m_TextStyleHashCode: -1183493901
   m_overrideHtmlColors: 0
   m_faceColor:
     serializedVersion: 2
@@ -315,10 +315,14 @@ MonoBehaviour:
   _faceLabel: {fileID: 6037610440358500484}
   _collider: {fileID: 3553420596908265737}
   _faceUpTiltAngle: 0
-  _liftHeight: 0.8
-  _liftDuration: 0.15
-  _dissolveOutDuration: 0.35
-  _dissolveInDuration: 0.35
+  _flyOutHeight: 4
+  _flyOutDuration: 0.16
+  _flyInHeight: 4
+  _flyInDuration: 0.2
+  _afterImageCount: 4
+  _afterImageInterval: 0.032
+  _afterImageReferenceSpeed: 18
+  _afterImageMaxAlpha: 0.1
   _tossDuration: 0.45
   _tossArcHeight: 1.2
   _tossSpinDegrees: 0
