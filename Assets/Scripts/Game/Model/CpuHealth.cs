@@ -19,6 +19,12 @@ namespace MixVerse.Game.Model
         /// <summary>JOKER が手札に入ったときのダメージの基準値。</summary>
         public const int JokerDamageBase = 20;
 
+        /// <summary>話し終わりに拍手を返してもらえなかったときのダメージ。ばらつきは付けない。</summary>
+        public const int ClapFailureDamage = 20;
+
+        /// <summary>トーク中の相槌（頷き）を返してもらえなかったときのダメージ。ばらつきは付けない。</summary>
+        public const int NodFailureDamage = 20;
+
         private const double MinDamageRate = 0.5;
         private const double MaxDamageRate = 1.5;
 
@@ -80,6 +86,25 @@ namespace MixVerse.Game.Model
 
             var rate = MinDamageRate + (random.NextDouble() * (MaxDamageRate - MinDamageRate));
             var amount = (int)Math.Round(damageBase * rate, MidpointRounding.AwayFromZero);
+
+            return ApplyFixedDamage(playerIndex, amount);
+        }
+
+        /// <summary>
+        /// ばらつきを付けず、ちょうど指定した量だけ体力を減らす。体力は 0 未満にならない。
+        /// 拍手を返せなかったときのように、減る量が決まっているダメージに使う。
+        /// </summary>
+        /// <param name="playerIndex">ダメージを受けるプレイヤー。</param>
+        /// <param name="amount">減らす量。<see cref="ClapFailureDamage"/> などを渡す。</param>
+        /// <returns>実際に減った量。</returns>
+        public int ApplyFixedDamage(int playerIndex, int amount)
+        {
+            ThrowIfOutOfRange(playerIndex);
+
+            if (amount < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(amount), amount, "ダメージに負の値は指定できません。");
+            }
 
             var before = _values[playerIndex];
             _values[playerIndex] = Math.Max(0, before - amount);

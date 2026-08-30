@@ -23,7 +23,7 @@ namespace MixVerse.Midi
         public const float DefaultFacingValue = 0.5f;
 
         [Header("MIDI Mapping")]
-        [Tooltip("MIDI チャンネル。表示と同じ 1 始まりで指定する。")]
+        [Tooltip("MIDI チャンネル。表示と同じ 1 始まりで指定する。0 なら全チャンネルを受け付ける。")]
         [SerializeField] private int _midiChannel = 1;
 
         [Tooltip("手札選択の開始と確定に使うノート番号（左デッキの SYNC ボタン）。")]
@@ -64,6 +64,16 @@ namespace MixVerse.Midi
         [Tooltip("この生の MIDI 値(0〜127)なら時計回り（下・右）、それ以外なら反時計回り（上・左）とみなす。")]
         [SerializeField] private int _cursorClockwiseRawValue = 1;
 
+        [Header("Nod Knobs")]
+        [Tooltip("CPU1 へ頷くときに回すコントロールチェンジ番号（左デッキのツマミ）。")]
+        [SerializeField] private int _leftNodControlNumber = 25;
+
+        [Tooltip("CPU2 へ頷くときに回すコントロールチェンジ番号（右デッキのツマミ）。")]
+        [SerializeField] private int _rightNodControlNumber = 24;
+
+        [Tooltip("この生の MIDI 値(0〜127)なら頷きを戻し、それ以外なら頷いて下を向く。")]
+        [SerializeField] private int _nodResetRawValue = 1;
+
         [Header("Debug")]
         [SerializeField] private bool _logToConsole;
 
@@ -71,6 +81,7 @@ namespace MixVerse.Midi
         private readonly Subject<DjDeckSide> _onCuePressed = new Subject<DjDeckSide>();
         private readonly Subject<int> _onJogStep = new Subject<int>();
         private readonly Subject<DjCursorStep> _onCursorStep = new Subject<DjCursorStep>();
+        private readonly Subject<DjNodStep> _onNodStep = new Subject<DjNodStep>();
         private readonly ReactiveProperty<float> _facingValue = new ReactiveProperty<float>(DefaultFacingValue);
 
         private readonly Dictionary<MidiDevice, Handlers> _boundDevices = new Dictionary<MidiDevice, Handlers>();
@@ -86,6 +97,9 @@ namespace MixVerse.Midi
 
         /// <summary>照準用のツマミが回された。どちらのデッキかと画面上の移動方向を持つ。</summary>
         public Observable<DjCursorStep> OnCursorStep => _onCursorStep;
+
+        /// <summary>頷き用のツマミが回された。どちらのデッキかと、頷いているかを持つ。</summary>
+        public Observable<DjNodStep> OnNodStep => _onNodStep;
 
         /// <summary>
         /// どちらをどれだけ向いているかを表すフェーダーの値。
@@ -108,6 +122,44 @@ namespace MixVerse.Midi
             }
 
             InputSystem.onDeviceChange += OnDeviceChange;
+
+            WarnIfNoDeviceBound();
+        }
+
+        /// <summary>
+        /// MIDI が一台も見つからないまま無反応になるのを防ぐための案内。
+        /// Minis はメッセージが届いた時点でデバイスを作るので、
+        /// 起動直後に 0 台なのは正常。ここでは原因の切り分け先だけ示す。
+        /// </summary>
+        private void WarnIfNoDeviceBound()
+        {
+            if (_boundDevices.Count > 0)
+            {
+                return;
+            }
+
+            var midiDeviceCount = 0;
+
+            foreach (var device in InputSystem.devices)
+            {
+                if (device is MidiDevice)
+                {
+                    midiDeviceCount++;
+                }
+            }
+
+            if (midiDeviceCount == 0)
+            {
+                Debug.LogWarning(
+                    "[DJ] MIDI デバイスがまだ1台もありません。操作しても無反応な場合、"
+                    + "Minis のドライバが落ちている可能性があります（Play 中にスクリプトを再コンパイルすると起きる）。"
+                    + "Unity エディタを再起動してください。");
+                return;
+            }
+
+            Debug.LogWarning(
+                $"[DJ] MIDI デバイスは {midiDeviceCount} 台ありますが、チャンネル {_midiChannel} に一致するものがありません。"
+                + "MidiTester でチャンネルを確認するか、MIDI Channel を 0（全チャンネル）にしてください。");
         }
 
         private void OnDisable()
@@ -124,11 +176,14 @@ namespace MixVerse.Midi
 
         private void OnDestroy()
         {
-            _onSyncPressed.Dispose();
-            _onCuePressed.Dispose();
-            _onJogStep.Dispose();
-            _onCursorStep.Dispose();
-            _facingValue.Dispose();
+            // OnCompleted を流すと、SYNC 待ちの FirstAsync が
+            // 「Sequence contains no elements」で落ちてしまうので流さずに畳む
+            _onSyncPressed.Dispose(false);
+            _onCuePressed.Dispose(false);
+            _onJogStep.Dispose(false);
+            _onCursorStep.Dispose(false);
+            _onNodStep.Dispose(false);
+            _facingValue.Dispose(false);
         }
 
         private void OnDeviceChange(InputDevice device, InputDeviceChange change)
@@ -157,9 +212,13 @@ namespace MixVerse.Midi
                 return;
             }
 
-            // Minis はチャンネルごとに別デバイスを作るので、対象チャンネル以外は無視する
-            if (midi.channel != _midiChannel - 1)
+            // Minis はチャンネルごとに別デバイスを作るので、対象チャンネル以外は無視する。
+            // 0 が指定されていたら機材側の設定が分からない場合の保険として全チャンネル受け付ける。
+            if (_midiChannel > 0 && midi.channel != _midiChannel - 1)
             {
+                Debug.Log(
+                    $"[DJ] チャンネル違いで無視: {midi.description.product} "
+                    + $"(ch{midi.channel + 1} / 設定は ch{_midiChannel})");
                 return;
             }
 
@@ -173,6 +232,8 @@ namespace MixVerse.Midi
             midi.onWillControlChange += handlers.ControlChange;
 
             _boundDevices.Add(midi, handlers);
+
+            Debug.Log($"[DJ] 接続: {midi.description.product} (ch{midi.channel + 1})");
         }
 
         private static void Unbind(MidiDevice midi, Handlers handlers)
@@ -270,6 +331,41 @@ namespace MixVerse.Midi
 
                 _onCursorStep.OnNext(cursorStep);
             }
+
+            if (TryGetNodStep(controlNumber, rawValue, out var nodStep))
+            {
+                if (_logToConsole)
+                {
+                    Debug.Log($"[DJ] Nod cc{controlNumber} raw={rawValue} deck={nodStep.DeckSide} nodding={nodStep.IsNodding}");
+                }
+
+                _onNodStep.OnNext(nodStep);
+            }
+        }
+
+        /// <summary>
+        /// コントロールチェンジ番号が頷き用のツマミかを判定する。
+        /// <see cref="_nodResetRawValue"/> なら元の向きへ戻し、それ以外の値なら頷いて下を向く。
+        /// どのツマミでもなければ false。
+        /// </summary>
+        private bool TryGetNodStep(int controlNumber, int rawValue, out DjNodStep nodStep)
+        {
+            var isNodding = rawValue != _nodResetRawValue;
+
+            if (controlNumber == _leftNodControlNumber)
+            {
+                nodStep = new DjNodStep(DjDeckSide.Left, isNodding);
+                return true;
+            }
+
+            if (controlNumber == _rightNodControlNumber)
+            {
+                nodStep = new DjNodStep(DjDeckSide.Right, isNodding);
+                return true;
+            }
+
+            nodStep = default;
+            return false;
         }
 
         /// <summary>

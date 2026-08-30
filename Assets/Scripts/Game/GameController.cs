@@ -59,6 +59,10 @@ namespace MixVerse.Game
             try
             {
                 await _presenter.PrepareAsync(Environment.TickCount, token);
+
+                // CPU のトークと拍手の判定は手番の進行と並行して回す
+                _presenter.StartCpuTalkLoops(token);
+
                 await _presenter.DiscardInitialPairsAsync(token);
 
                 var turns = 0;

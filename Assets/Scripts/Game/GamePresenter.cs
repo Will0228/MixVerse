@@ -29,8 +29,14 @@ namespace MixVerse.Game
         /// <summary>拍手の成否を見せてから、次のトークまでの間に戻すまでの時間。</summary>
         private const float TalkResultDuration = 1.5f;
 
-        /// <summary>締め以外のトーク（talk_1〜3）が終わるまでの何秒前から頷きを受け付けるか。</summary>
-        private const float NodCheckWindowSeconds = 0.5f;
+        /// <summary>締め以外のトーク（talk_1〜3）が終わる何秒前から頷きを受け付け始めるか。</summary>
+        private const float NodCheckLeadSeconds = 1f;
+
+        /// <summary>締め以外のトーク（talk_1〜3）が終わってから、さらに何秒だけ頷きの猶予を延ばすか。</summary>
+        private const float NodCheckTrailSeconds = 1f;
+
+        /// <summary>頷きの猶予（前後合わせて2秒）のうちにそろえる必要のある頷きの回数。</summary>
+        private const int RequiredNodCount = 3;
 
         /// <summary>どちらも向き切っていないことを表す番兵。</summary>
         private const int NoFacingPlayer = -1;
@@ -65,8 +71,15 @@ namespace MixVerse.Game
         /// フェーダーで向き切っている相手へ、頷き用のツマミが現在「頷け」と指示しているか。
         /// 手札と同じ並び（0 がプレイヤー）で、プレイヤーの枠は使わない。
         /// フェーダーが振り切れていなければ CanActOn が false になるので、その間は見ない。
+        /// 頷きの回数を数えるとき、戻す→頷く（false→true）の切り替わりを1回として拾うのにも使う。
         /// </summary>
         private readonly bool[] _isNoddingTowards = new bool[OldMaidGame.DefaultPlayerCount];
+
+        /// <summary>
+        /// 直近の頷きチェック中に数えた頷きの回数。手札と同じ並び（0 がプレイヤー）で、プレイヤーの枠は使わない。
+        /// トークの音源ごとに <see cref="WaitLineAndCheckNodAsync"/> の先頭で 0 に戻す。
+        /// </summary>
+        private readonly int[] _nodCounts = new int[OldMaidGame.DefaultPlayerCount];
 
         /// <summary>
         /// CPU ごとの拍手判定。手札と同じ並び（0 がプレイヤー）で、プレイヤーの枠は使わない。
@@ -156,6 +169,13 @@ namespace MixVerse.Game
                     }
 
                     _view.SetCameraNodding(nodStep.IsNodding);
+
+                    // 戻した状態から頷いた瞬間だけを1回として数える。頷いたまま値が揺れても増えない。
+                    if (nodStep.IsNodding && !_isNoddingTowards[deckPlayerIndex])
+                    {
+                        _nodCounts[deckPlayerIndex]++;
+                    }
+
                     _isNoddingTowards[deckPlayerIndex] = nodStep.IsNodding;
                 })
                 .AddTo(disposable);
@@ -292,7 +312,7 @@ namespace MixVerse.Game
             // JOKER は誰ともペアにならず手札に残るので、引き当てた CPU はその時点でダメージを受ける
             if (result.DrawerIndex != HumanPlayerIndex && result.DrawnCard.IsJoker)
             {
-                await ApplyCpuDamageAsync(result.DrawerIndex, CpuHealth.JokerDamageBase, token);
+                ApplyCpuDamage(result.DrawerIndex, CpuHealth.JokerDamageBase, token);
             }
 
             if (result.DrawerIndex == HumanPlayerIndex)
@@ -334,39 +354,45 @@ namespace MixVerse.Game
                     continue;
                 }
 
-                await ApplyCpuDamageAsync(playerIndex, CpuHealth.HandCountDamageBase, token);
+                ApplyCpuDamage(playerIndex, CpuHealth.HandCountDamageBase, token);
             }
         }
 
         /// <summary>
         /// CPU の体力を減らす。体力が初めて減った CPU は、グリッチで乱れながら別のキャラクターへ変わる。
         /// </summary>
-        private UniTask ApplyCpuDamageAsync(int playerIndex, int damageBase, CancellationToken token)
+        private void ApplyCpuDamage(int playerIndex, int damageBase, CancellationToken token)
         {
             var wasDamaged = _cpuHealth.IsDamaged(playerIndex);
 
             _cpuHealth.ApplyDamage(playerIndex, damageBase, _random);
 
-            return PlayFirstDamageMorphAsync(playerIndex, wasDamaged, token);
+            PlayFirstDamageMorph(playerIndex, wasDamaged, token);
         }
 
         /// <summary>
         /// 減る量が決まっているダメージを与える。拍手を返してもらえなかったときに使う。
         /// </summary>
-        private UniTask ApplyCpuFixedDamageAsync(int playerIndex, int amount, CancellationToken token)
+        private void ApplyCpuFixedDamage(int playerIndex, int amount, CancellationToken token)
         {
             var wasDamaged = _cpuHealth.IsDamaged(playerIndex);
 
             _cpuHealth.ApplyFixedDamage(playerIndex, amount);
 
-            return PlayFirstDamageMorphAsync(playerIndex, wasDamaged, token);
+            PlayFirstDamageMorph(playerIndex, wasDamaged, token);
         }
 
         /// <summary>
         /// 体力が初めて減った CPU だけ変身させる。2回目以降は変身済みなので演出は出さない。
+        /// 変身が終わるまで手番の進行を止めたくないので、待たずに投げっぱなしにする。
         /// </summary>
-        private UniTask PlayFirstDamageMorphAsync(int playerIndex, bool wasDamaged, CancellationToken token)
-            => wasDamaged ? UniTask.CompletedTask : _view.PlayCharacterMorphAsync(playerIndex, token);
+        private void PlayFirstDamageMorph(int playerIndex, bool wasDamaged, CancellationToken token)
+        {
+            if (!wasDamaged)
+            {
+                _view.PlayCharacterMorphAsync(playerIndex, token).Forget();
+            }
+        }
 
         /// <summary>
         /// CPU ごとのトークを並行して回し始める。話し終わりに拍手を返せなかった CPU は体力を失う。
@@ -453,7 +479,7 @@ namespace MixVerse.Game
                         playerIndex,
                         "No nod... " + GetPlayerName(playerIndex) + " -" + CpuHealth.NodFailureDamage + " HP");
 
-                    await ApplyCpuFixedDamageAsync(playerIndex, CpuHealth.NodFailureDamage, token);
+                    ApplyCpuFixedDamage(playerIndex, CpuHealth.NodFailureDamage, token);
                     await _view.WaitAsync(TalkResultDuration, token);
                     return;
                 }
@@ -474,7 +500,7 @@ namespace MixVerse.Game
                         playerIndex,
                         "Too quiet... " + GetPlayerName(playerIndex) + " -" + CpuHealth.ClapFailureDamage + " HP");
 
-                    await ApplyCpuFixedDamageAsync(playerIndex, CpuHealth.ClapFailureDamage, token);
+                    ApplyCpuFixedDamage(playerIndex, CpuHealth.ClapFailureDamage, token);
                 }
 
                 await _view.WaitAsync(TalkResultDuration, token);
@@ -489,49 +515,48 @@ namespace MixVerse.Game
         }
 
         /// <summary>
-        /// トークの音源を最後まで聞かせつつ、鳴り終わる <see cref="NodCheckWindowSeconds"/> 秒前からは
-        /// 頷けたかを見張る。音源自体がそれより短ければ、全体を通して見張る。
+        /// トークの音源を最後まで聞かせつつ、鳴り終わる <see cref="NodCheckLeadSeconds"/> 秒前から
+        /// 鳴り終わってさらに <see cref="NodCheckTrailSeconds"/> 秒後まで（音源が短ければその分だけ）
+        /// 頷きを受け付け、<see cref="RequiredNodCount"/> 回そろえられたかを見る。
+        /// そろった時点でそれ以上待たずに次へ進む。
         /// </summary>
-        /// <returns>その間に一度でも頷けていれば true。</returns>
+        /// <returns>猶予のうちに規定回数そろえられていれば true。</returns>
         private async UniTask<bool> WaitLineAndCheckNodAsync(int playerIndex, float lineLength, CancellationToken token)
         {
-            var checkDuration = Mathf.Min(lineLength, NodCheckWindowSeconds);
-            var leadDuration = lineLength - checkDuration;
+            var leadCheckDuration = Mathf.Min(lineLength, NodCheckLeadSeconds);
+            var leadWaitDuration = lineLength - leadCheckDuration;
 
-            if (leadDuration > 0f)
+            if (leadWaitDuration > 0f)
             {
-                await _view.WaitAsync(leadDuration, token);
+                await _view.WaitAsync(leadWaitDuration, token);
             }
 
-            return await PollNoddingAsync(playerIndex, checkDuration, token);
+            // ここまでに数えていた分は今回の判定に含めない
+            _nodCounts[playerIndex] = 0;
+
+            return await PollNodCountAsync(playerIndex, leadCheckDuration + NodCheckTrailSeconds, token);
         }
 
         /// <summary>
-        /// 指定時間のあいだ、毎フレーム頷けているかを見張る。
-        /// 一瞬でも頷けていれば、その後に手を放しても成功として扱う。
+        /// 指定時間のあいだ、毎フレーム頷きの回数が <see cref="RequiredNodCount"/> にそろったかを見張る。
+        /// そろった時点で即座に true を返し、残り時間を待たせない。
         /// </summary>
-        private async UniTask<bool> PollNoddingAsync(int playerIndex, float duration, CancellationToken token)
+        private async UniTask<bool> PollNodCountAsync(int playerIndex, float duration, CancellationToken token)
         {
             var deadline = Time.time + duration;
-            var nodded = false;
 
             while (Time.time < deadline)
             {
-                if (IsNoddingAt(playerIndex))
+                if (_nodCounts[playerIndex] >= RequiredNodCount)
                 {
-                    nodded = true;
+                    return true;
                 }
 
                 await UniTask.Yield(PlayerLoopTiming.Update, token);
             }
 
-            return nodded;
+            return _nodCounts[playerIndex] >= RequiredNodCount;
         }
-
-        /// <summary>
-        /// フェーダーでその相手を向き切ったうえで、頷き用のツマミが「頷け」と指示しているか。
-        /// </summary>
-        private bool IsNoddingAt(int playerIndex) => CanActOn(playerIndex) && _isNoddingTowards[playerIndex];
 
         /// <summary>
         /// 拍手の判定が決まるまで、あと何回必要かを出しながら待つ。
