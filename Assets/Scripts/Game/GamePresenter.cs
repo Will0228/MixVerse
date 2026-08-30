@@ -23,6 +23,24 @@ namespace MixVerse.Game
         private const float TurnIntervalDuration = 0.2f;
         private const float ResultToHomeDelay = 5f;
 
+        /// <summary>CPU が話し終わってから、次に話し始めるまでの間隔。動作確認用に固定値にしてある。</summary>
+        private const float TalkIntervalDuration = 10f;
+
+        /// <summary>拍手の成否を見せてから、次のトークまでの間に戻すまでの時間。</summary>
+        private const float TalkResultDuration = 1.5f;
+
+        /// <summary>締め以外のトーク（talk_1〜3）が終わるまでの何秒前から頷きを受け付けるか。</summary>
+        private const float NodCheckWindowSeconds = 0.5f;
+
+        /// <summary>どちらも向き切っていないことを表す番兵。</summary>
+        private const int NoFacingPlayer = -1;
+
+        /// <summary>
+        /// トーク用の乱数器に足す値。トークは実時間で回るため、同じ seed でも呼ばれる回数が変わる。
+        /// 手番の進行に使う乱数器を巻き込まないよう、別の並びを作るためにずらしている。
+        /// </summary>
+        private const int TalkSeedOffset = 7919;
+
         /// <summary>SYNC が押されたことを表す番兵。手札インデックスと区別するため負値にする。</summary>
         private const int CursorConfirmed = -1;
 
@@ -39,18 +57,42 @@ namespace MixVerse.Game
         private readonly OldMaidGame _game;
         private readonly CpuStrategy _cpuStrategy;
         private readonly CpuHealth _cpuHealth;
+        private readonly CpuTalkScript _talkScript;
         private readonly DjControllerInput _djController;
         private readonly ClapGestureDetector _clapGestureDetector = new ClapGestureDetector();
 
+        /// <summary>
+        /// フェーダーで向き切っている相手へ、頷き用のツマミが現在「頷け」と指示しているか。
+        /// 手札と同じ並び（0 がプレイヤー）で、プレイヤーの枠は使わない。
+        /// フェーダーが振り切れていなければ CanActOn が false になるので、その間は見ない。
+        /// </summary>
+        private readonly bool[] _isNoddingTowards = new bool[OldMaidGame.DefaultPlayerCount];
+
+        /// <summary>
+        /// CPU ごとの拍手判定。手札と同じ並び（0 がプレイヤー）で、プレイヤーの枠は使わない。
+        /// 2人が同時に話すため、判定も相手ごとに分けて持つ。
+        /// </summary>
+        private readonly ClapChallenge[] _clapChallenges = CreateClapChallenges();
+
+        /// <summary>
+        /// CPU のトークが同時に始まらないようにする排他ロック。
+        /// 一方が話している間、もう一方は話し終わるまで待つ。
+        /// </summary>
+        private readonly SemaphoreSlim _talkSemaphore = new SemaphoreSlim(1, 1);
+
         private Random _random;
 
+        /// <summary>トークの内容を決める乱数器。手番の進行とは別に持つ。</summary>
+        private Random _talkRandom;
+
         [Inject]
-        public GamePresenter(GameView view, OldMaidGame game, CpuStrategy cpuStrategy, CpuHealth cpuHealth, DjControllerInput djController)
+        public GamePresenter(GameView view, OldMaidGame game, CpuStrategy cpuStrategy, CpuHealth cpuHealth, CpuTalkScript talkScript, DjControllerInput djController)
         {
             _view = view;
             _game = game;
             _cpuStrategy = cpuStrategy;
             _cpuHealth = cpuHealth;
+            _talkScript = talkScript;
             _djController = djController;
         }
 
@@ -61,6 +103,7 @@ namespace MixVerse.Game
         /// <summary>
         /// フェーダーでどちらを向くかを決め、向いた相手に対して CUE で拍手する手を出し入れする。
         /// 表示中はジョグの回転方向で手を開閉させる（時計回りで合わせ、反時計回りで放す）。
+        /// 向いた相手ごとの頷き用ツマミも受け付け、拍手と並行してカメラを上下させる。
         /// 手番の進行とは独立して常に受け付けるため、Controller のライフサイクルに紐づけて一度だけ呼ぶ。
         /// </summary>
         public void SetupDjControls(CompositeDisposable disposable)
@@ -95,6 +138,28 @@ namespace MixVerse.Game
                 })
                 .AddTo(disposable);
 
+            _djController.OnNodStep
+                .Subscribe(nodStep =>
+                {
+                    var deckPlayerIndex = GetDeckPlayerIndex(nodStep.DeckSide);
+
+                    // 拍手とは並行して行えるが、カード選択中（SYNC で照準を出している間）は頷けない
+                    if (_view.IsDrawSelectionActive)
+                    {
+                        return;
+                    }
+
+                    // フェーダーがその相手を向き切っているときだけ頷ける
+                    if (!CanActOn(deckPlayerIndex))
+                    {
+                        return;
+                    }
+
+                    _view.SetCameraNodding(nodStep.IsNodding);
+                    _isNoddingTowards[deckPlayerIndex] = nodStep.IsNodding;
+                })
+                .AddTo(disposable);
+
             _djController.OnJogStep
                 .Subscribe(step =>
                 {
@@ -106,6 +171,12 @@ namespace MixVerse.Game
                     if (_clapGestureDetector.RegisterStep(step, out var isClosed))
                     {
                         _view.SetHandsClosed(isClosed);
+
+                        // 手を打ち合わせた瞬間だけ、話し終えた CPU への拍手として数える
+                        if (isClosed)
+                        {
+                            RegisterClap();
+                        }
                     }
                 })
                 .AddTo(disposable);
@@ -120,13 +191,19 @@ namespace MixVerse.Game
             var targetIndex = value >= center ? LeftDeckPlayerIndex : RightDeckPlayerIndex;
 
             // 中央からの距離をそのまま向き具合にする（端まで倒すと 1）
-            _view.SetCameraFacing(targetIndex, Mathf.Abs(value - center) / center);
+            var amount = Mathf.Abs(value - center) / center;
 
-            // 振り切っていない間はその相手に何もできないので、出したままの手は引っ込める
+            _view.SetCameraFacing(targetIndex, amount);
+
+            // 向いた相手の声ほど大きく、反対側の相手ほど小さく聞こえるようにする
+            _view.SetTalkVolumes(targetIndex, amount);
+
+            // 振り切っていない間はその相手に何もできないので、出したままの手は引っ込め、頷きも戻す
             if (!CanActOn(targetIndex))
             {
                 _view.HideClapHands();
                 _clapGestureDetector.Reset();
+                _view.SetCameraNodding(false);
             }
         }
 
@@ -163,6 +240,13 @@ namespace MixVerse.Game
         public async UniTask PrepareAsync(int seed, CancellationToken token)
         {
             _random = new Random(seed);
+            _talkRandom = new Random(seed + TalkSeedOffset);
+
+            foreach (var challenge in _clapChallenges)
+            {
+                challenge.End();
+            }
+
             _game.Start(OldMaidGame.DefaultPlayerCount, seed);
             _cpuHealth.Reset(OldMaidGame.DefaultPlayerCount);
 
@@ -257,17 +341,269 @@ namespace MixVerse.Game
         /// <summary>
         /// CPU の体力を減らす。体力が初めて減った CPU は、グリッチで乱れながら別のキャラクターへ変わる。
         /// </summary>
-        private async UniTask ApplyCpuDamageAsync(int playerIndex, int damageBase, CancellationToken token)
+        private UniTask ApplyCpuDamageAsync(int playerIndex, int damageBase, CancellationToken token)
         {
             var wasDamaged = _cpuHealth.IsDamaged(playerIndex);
 
             _cpuHealth.ApplyDamage(playerIndex, damageBase, _random);
 
-            // 2回目以降は変身済みなので演出は出さない
-            if (!wasDamaged)
+            return PlayFirstDamageMorphAsync(playerIndex, wasDamaged, token);
+        }
+
+        /// <summary>
+        /// 減る量が決まっているダメージを与える。拍手を返してもらえなかったときに使う。
+        /// </summary>
+        private UniTask ApplyCpuFixedDamageAsync(int playerIndex, int amount, CancellationToken token)
+        {
+            var wasDamaged = _cpuHealth.IsDamaged(playerIndex);
+
+            _cpuHealth.ApplyFixedDamage(playerIndex, amount);
+
+            return PlayFirstDamageMorphAsync(playerIndex, wasDamaged, token);
+        }
+
+        /// <summary>
+        /// 体力が初めて減った CPU だけ変身させる。2回目以降は変身済みなので演出は出さない。
+        /// </summary>
+        private UniTask PlayFirstDamageMorphAsync(int playerIndex, bool wasDamaged, CancellationToken token)
+            => wasDamaged ? UniTask.CompletedTask : _view.PlayCharacterMorphAsync(playerIndex, token);
+
+        /// <summary>
+        /// CPU ごとのトークを並行して回し始める。話し終わりに拍手を返せなかった CPU は体力を失う。
+        /// 手番の進行とも並行するので、待たずに投げっぱなしにする。
+        /// 拍手には DJ コントローラーが要るため、未接続の環境では何もしない。
+        /// </summary>
+        public void StartCpuTalkLoops(CancellationToken token)
+        {
+            if (_djController == null)
             {
-                await _view.PlayCharacterMorphAsync(playerIndex, token);
+                return;
             }
+
+            for (var playerIndex = 0; playerIndex < _game.PlayerCount; playerIndex++)
+            {
+                if (playerIndex == HumanPlayerIndex)
+                {
+                    continue;
+                }
+
+                RunCpuTalkLoopAsync(playerIndex, token).Forget();
+            }
+        }
+
+        /// <summary>
+        /// 1人ぶんのトークを一定間隔で繰り返す。もう一方が話している間は、
+        /// 空くまで待ってから話し始める（同時に話さないようにする）。
+        /// </summary>
+        private async UniTask RunCpuTalkLoopAsync(int playerIndex, CancellationToken token)
+        {
+            while (!_game.IsGameOver)
+            {
+                await _view.WaitAsync(TalkIntervalDuration, token);
+
+                // 決着した・上がった・体力が尽きた CPU は話さない。
+                // プレイヤーがカードを狙っている最中も、照準を出している間は CUE を受け付けず
+                // 拍手のしようがないので見送る。
+                if (_game.IsGameOver
+                    || _game.IsFinished(playerIndex)
+                    || _cpuHealth.IsDepleted(playerIndex)
+                    || _view.IsDrawSelectionActive)
+                {
+                    continue;
+                }
+
+                await _talkSemaphore.WaitAsync(token);
+
+                try
+                {
+                    await RunCpuTalkAsync(playerIndex, token);
+                }
+                finally
+                {
+                    _talkSemaphore.Release();
+                }
+            }
+        }
+
+        /// <summary>
+        /// 1人ぶんのトーク。音源を順に流し、締めの1本に合わせて拍手を求める。
+        /// </summary>
+        private async UniTask RunCpuTalkAsync(int playerIndex, CancellationToken token)
+        {
+            var lines = _talkScript.CreateSequence(_talkRandom);
+            var challenge = _clapChallenges[playerIndex];
+
+            try
+            {
+                _view.SetClapChallengeText(playerIndex, GetPlayerName(playerIndex) + " is talking...");
+
+                // 締めの手前（talk_1〜3）は、鳴り終わる直前に頷けたかを確かめながら流す。
+                // 頷けなかった時点で相槌を求められなかったとみなし、以降の会話（締めや拍手判定）はせず中断する。
+                for (var i = 0; i < lines.Count - 1; i++)
+                {
+                    var lineLength = _view.PlayTalkLine(playerIndex, lines[i]);
+                    var nodded = await WaitLineAndCheckNodAsync(playerIndex, lineLength, token);
+
+                    if (nodded)
+                    {
+                        continue;
+                    }
+
+                    _view.SetClapChallengeText(
+                        playerIndex,
+                        "No nod... " + GetPlayerName(playerIndex) + " -" + CpuHealth.NodFailureDamage + " HP");
+
+                    await ApplyCpuFixedDamageAsync(playerIndex, CpuHealth.NodFailureDamage, token);
+                    await _view.WaitAsync(TalkResultDuration, token);
+                    return;
+                }
+
+                // 締めの1本。鳴り終わる時刻を渡し、その少し前から拍手を数え始める
+                var finishLength = _view.PlayTalkLine(playerIndex, lines[lines.Count - 1]);
+                challenge.Begin(Time.time + finishLength);
+
+                var succeeded = await WaitForClapAsync(playerIndex, token);
+
+                if (succeeded)
+                {
+                    _view.SetClapChallengeText(playerIndex, "Nice clap!");
+                }
+                else
+                {
+                    _view.SetClapChallengeText(
+                        playerIndex,
+                        "Too quiet... " + GetPlayerName(playerIndex) + " -" + CpuHealth.ClapFailureDamage + " HP");
+
+                    await ApplyCpuFixedDamageAsync(playerIndex, CpuHealth.ClapFailureDamage, token);
+                }
+
+                await _view.WaitAsync(TalkResultDuration, token);
+            }
+            finally
+            {
+                // 中断されても、拍手を数えっぱなしにしたり表示を残したりしない
+                challenge.End();
+                _view.SetClapChallengeText(playerIndex, string.Empty);
+                _view.StopTalk(playerIndex);
+            }
+        }
+
+        /// <summary>
+        /// トークの音源を最後まで聞かせつつ、鳴り終わる <see cref="NodCheckWindowSeconds"/> 秒前からは
+        /// 頷けたかを見張る。音源自体がそれより短ければ、全体を通して見張る。
+        /// </summary>
+        /// <returns>その間に一度でも頷けていれば true。</returns>
+        private async UniTask<bool> WaitLineAndCheckNodAsync(int playerIndex, float lineLength, CancellationToken token)
+        {
+            var checkDuration = Mathf.Min(lineLength, NodCheckWindowSeconds);
+            var leadDuration = lineLength - checkDuration;
+
+            if (leadDuration > 0f)
+            {
+                await _view.WaitAsync(leadDuration, token);
+            }
+
+            return await PollNoddingAsync(playerIndex, checkDuration, token);
+        }
+
+        /// <summary>
+        /// 指定時間のあいだ、毎フレーム頷けているかを見張る。
+        /// 一瞬でも頷けていれば、その後に手を放しても成功として扱う。
+        /// </summary>
+        private async UniTask<bool> PollNoddingAsync(int playerIndex, float duration, CancellationToken token)
+        {
+            var deadline = Time.time + duration;
+            var nodded = false;
+
+            while (Time.time < deadline)
+            {
+                if (IsNoddingAt(playerIndex))
+                {
+                    nodded = true;
+                }
+
+                await UniTask.Yield(PlayerLoopTiming.Update, token);
+            }
+
+            return nodded;
+        }
+
+        /// <summary>
+        /// フェーダーでその相手を向き切ったうえで、頷き用のツマミが「頷け」と指示しているか。
+        /// </summary>
+        private bool IsNoddingAt(int playerIndex) => CanActOn(playerIndex) && _isNoddingTowards[playerIndex];
+
+        /// <summary>
+        /// 拍手の判定が決まるまで、あと何回必要かを出しながら待つ。
+        /// </summary>
+        /// <returns>規定回数そろえられたか。</returns>
+        private async UniTask<bool> WaitForClapAsync(int playerIndex, CancellationToken token)
+        {
+            var challenge = _clapChallenges[playerIndex];
+
+            while (true)
+            {
+                var result = challenge.Evaluate(Time.time);
+
+                if (result != ClapChallengeResult.Pending)
+                {
+                    return result == ClapChallengeResult.Success;
+                }
+
+                // デバッグ表示。「あと n 回」と、そろえるまでの残り時間を出しておく。
+                // HUD のフォント（LiberationSans SDF）に日本語の字が無いため、表記は英数字にしている。
+                _view.SetClapChallengeText(
+                    playerIndex,
+                    "Clap for " + GetPlayerName(playerIndex)
+                    + " - " + challenge.RemainingClapCount + " more"
+                    + " (" + challenge.GetRemainingSeconds(Time.time).ToString("0.0") + "s)");
+
+                await UniTask.Yield(PlayerLoopTiming.Update, token);
+            }
+        }
+
+        /// <summary>
+        /// 拍手を1回数える。向き切っている相手への拍手として扱うので、
+        /// 2人が同時に話していても、向いているほうにだけ届く。
+        /// </summary>
+        private void RegisterClap()
+        {
+            var facingIndex = GetFacingPlayerIndex();
+
+            if (facingIndex == NoFacingPlayer)
+            {
+                return;
+            }
+
+            _clapChallenges[facingIndex].RegisterClap(Time.time);
+        }
+
+        /// <summary>
+        /// フェーダーで向き切っている相手。どちらも向き切っていなければ <see cref="NoFacingPlayer"/>。
+        /// </summary>
+        private int GetFacingPlayerIndex()
+        {
+            if (CanActOn(LeftDeckPlayerIndex))
+            {
+                return LeftDeckPlayerIndex;
+            }
+
+            return CanActOn(RightDeckPlayerIndex) ? RightDeckPlayerIndex : NoFacingPlayer;
+        }
+
+        /// <summary>
+        /// CPU ごとの拍手判定を作る。手札と同じ並びにしておき、プレイヤーの枠は使わない。
+        /// </summary>
+        private static ClapChallenge[] CreateClapChallenges()
+        {
+            var challenges = new ClapChallenge[OldMaidGame.DefaultPlayerCount];
+
+            for (var i = 0; i < challenges.Length; i++)
+            {
+                challenges[i] = new ClapChallenge();
+            }
+
+            return challenges;
         }
 
         /// <summary>
@@ -330,6 +666,9 @@ namespace MixVerse.Game
 
             // ② ここから手札選択状態。画面のランダムな位置に照準が出るので、
             //    ツマミで動かして狙ったカードに重ねる
+            // 照準を出している間は頷けないので、下を向いたままにならないよう戻しておく
+            _view.SetCameraNodding(false);
+
             await _view.BeginDrawSelectionAsync(targetIndex, token);
 
             _view.HideArrow();
