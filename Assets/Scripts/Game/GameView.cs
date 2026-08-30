@@ -31,6 +31,25 @@ namespace MixVerse.Game
         [Header("Sound")]
         [SerializeField] private AudioSource _bgmSource;
 
+        // CPU の話し声。手札と同じ並び（0 がプレイヤー）で、プレイヤーの枠は空のままでよい。
+        // 2人が同時に話すため、どちらを向いているかで音量を変えられるよう CPU ごとに分けている
+        [SerializeField] private AudioSource[] _talkSources;
+
+        [Tooltip("正面を向いているときの話し声の音量。")]
+        [SerializeField] private float _talkCenterVolume = 0.3f;
+
+        [Tooltip("その相手を向き切っているときの、その相手の話し声の音量。")]
+        [SerializeField] private float _talkFacingVolume = 1f;
+
+        [Tooltip("その相手を向き切っているときの、反対側の相手の話し声の音量。")]
+        [SerializeField] private float _talkAwayVolume = 0.05f;
+
+        [SerializeField] private AudioClip _talk1Clip;
+        [SerializeField] private AudioClip _talk2Clip;
+        [SerializeField] private AudioClip _talk3Clip;
+        [SerializeField] private AudioClip _talkFinish1Clip;
+        [SerializeField] private AudioClip _talkFinish2Clip;
+
         [Header("Hud")]
         [SerializeField] private CanvasGroup _canvasGroup;
         // 3D の盤面は CanvasGroup ではフェードできないため、画面全体を覆う黒板を別に用意する
@@ -39,6 +58,10 @@ namespace MixVerse.Game
         [SerializeField] private TargetCursorView _targetCursor;
         [SerializeField] private TextMeshProUGUI _turnLabel;
         [SerializeField] private TextMeshProUGUI _resultLabel;
+
+        // 拍手があと何回必要かを出すデバッグ用の表示。手札と同じ並び（0 がプレイヤー）で、
+        // 2人が同時に話すため CPU ごとに分けている。プレイヤーの枠は空のままでよい
+        [SerializeField] private TextMeshProUGUI[] _clapChallengeLabels;
 
         [Header("Discard Pile")]
         // そろったカードは盤面中央に残す。きれいに重ねると不自然なので位置と向きを散らす。
@@ -57,6 +80,13 @@ namespace MixVerse.Game
         // 正面（フェーダーが真ん中）を向いているときのカメラの向き。未設定なら最初に使ったときのカメラの向きを使う
         [SerializeField] private Transform _defaultCameraPoint;
 
+        [Header("Nod Camera")]
+        [Tooltip("頷いたときにカメラを下へ傾ける角度。")]
+        [SerializeField] private float _nodPitchAngle = 12f;
+
+        [Tooltip("頷いて下を向く／元に戻るのにかける時間（秒）。")]
+        [SerializeField] private float _nodDuration = 0.15f;
+
         private readonly Subject<CardView> _onCardClicked = new Subject<CardView>();
         private readonly CompositeDisposable _cardSubscriptions = new CompositeDisposable();
         private readonly List<CardView> _spawnedCards = new List<CardView>();
@@ -70,6 +100,16 @@ namespace MixVerse.Game
         private Quaternion _cameraHomeRotation;
         private bool _hasCameraHomeRotation;
 
+        // フェーダーで決まった向き。頷きを重ねたり戻したりするたびに作り直せるよう覚えておく。
+        private int _facingTargetIndex;
+        private float _facingAmount;
+
+        // 頷きの傾き具合（0 が元の向き、1 が下を向き切った状態）。
+        // ツマミの1ステップごとに角度が飛ぶとカクついて見えるため、
+        // 目標値へ向かって時間をかけて寄せていく。
+        private float _nodAmount;
+        private float _nodTargetAmount;
+
         /// <summary>捨て札置き場に積まれた枚数。積み上げる高さの計算に使う。</summary>
         private int _discardStackCount;
 
@@ -81,11 +121,33 @@ namespace MixVerse.Game
         private Camera BoardCamera => _boardCamera != null ? _boardCamera : Camera.main;
 
         /// <summary>
+        /// 頷きの傾きを毎フレーム目標へ近づける。
+        /// 矢印や照準はカメラの向きを見て LateUpdate で位置を決めるので、それより先に動かす。
+        /// </summary>
+        private void Update()
+        {
+            if (Mathf.Approximately(_nodAmount, _nodTargetAmount))
+            {
+                return;
+            }
+
+            var step = _nodDuration > 0f ? Time.deltaTime / _nodDuration : 1f;
+
+            _nodAmount = Mathf.MoveTowards(_nodAmount, _nodTargetAmount, step);
+
+            ApplyCameraRotation();
+        }
+
+        /// <summary>
         /// 画面を有効化してフェードインする。
         /// </summary>
         public async UniTask ShowAsync(CancellationToken token)
         {
             gameObject.SetActive(true);
+
+            // 前の対局で頷いたまま終わっていても、始まりは元の向きから
+            _nodAmount = 0f;
+            _nodTargetAmount = 0f;
 
             if (_bgmSource != null && !_bgmSource.isPlaying)
             {
@@ -107,6 +169,8 @@ namespace MixVerse.Game
             {
                 _resultLabel.gameObject.SetActive(false);
             }
+
+            ClearClapChallengeTexts();
 
             // 前の対局で変身したままのキャラクターを元に戻す
             ResetCharacterMorphs();
@@ -206,7 +270,8 @@ namespace MixVerse.Game
         }
 
         /// <summary>
-        /// 引かれたカードが上に浮いてから溶けて消え、引いた側の手札で実体化する演出。
+        /// 引かれたカードが真上へ素早く抜け、引いた側の手札へ真上から降りてくる演出。
+        /// どちらの移動中も、速さに応じた残像が尾を引く。
         /// </summary>
         public async UniTask PlayDrawAsync(DrawResult result, CancellationToken token)
         {
@@ -220,24 +285,24 @@ namespace MixVerse.Game
             // 移動中は手札の子から外し、ワールド座標で動かす
             cardView.transform.SetParent(transform, true);
 
-            await cardView.PlayDissolveOutAsync(token);
+            await cardView.PlayFlyOutAsync(token);
 
-            // 選択可能になった瞬間からこちらへ向けていた手札は、カードが消えているこの間に戻す。
-            // 実体化を引いた側の手札で見せたいので、戻すのはディゾルブインより前。
+            // 選択可能になった瞬間からこちらへ向けていた手札は、カードが抜けているこの間に戻す。
+            // 降りてくるところを引いた側の手札で見せたいので、戻すのは降ろすより前。
             if (_activeDrawHand == fromHand)
             {
                 _activeDrawHand = null;
                 await PlayHandFacingAsync(fromHand, _drawHandHomeRotation, token);
             }
 
-            // 移動と表裏の切り替えも消えている間に済ませるので、
-            // 相手の手札から自分の手札へ飛ぶ様子や裏返る瞬間は見えない
-            cardView.transform.position = toHand.GetIncomingWorldPosition();
+            // 着地点は手札に加える前に決める。加えたあとだと枚数が増えて位置がずれる。
+            var incomingPosition = toHand.GetIncomingWorldPosition();
 
+            // 表裏の切り替えは見えていない間に済ませるので、裏返る瞬間は見えない
             toHand.Add(cardView);
             cardView.SetFaceUp(toHand.IsFaceUp);
 
-            await cardView.PlayDissolveInAsync(token);
+            await cardView.PlayFlyInAsync(incomingPosition, token);
 
             await UniTask.WhenAll(
                 toHand.ArrangeAsync(_arrangeDuration, token),
@@ -375,7 +440,163 @@ namespace MixVerse.Game
         /// <summary>
         /// ホーム画面へ戻る際に、この画面を非表示にする。
         /// </summary>
-        public void Hide() => gameObject.SetActive(false);
+        public void Hide()
+        {
+            StopAllTalk();
+            ClearClapChallengeTexts();
+            gameObject.SetActive(false);
+        }
+
+        /// <summary>
+        /// 指定した CPU の声を1つ再生し、その長さ（秒）を返す。
+        /// 音源が設定されていなければ何もせず 0 を返すので、待ち時間もそのまま 0 になる。
+        /// </summary>
+        public float PlayTalkLine(int playerIndex, CpuTalkLine line)
+        {
+            var source = GetTalkSource(playerIndex);
+            var clip = GetTalkClip(line);
+
+            if (source == null || clip == null)
+            {
+                return 0f;
+            }
+
+            // 前の1本が残っていても、次の1本で上書きして続けて聞こえるようにする
+            source.Stop();
+            source.clip = clip;
+            source.Play();
+
+            return clip.length;
+        }
+
+        /// <summary>話し途中で画面を離れたときなどに、その CPU の声を止める。</summary>
+        public void StopTalk(int playerIndex)
+        {
+            var source = GetTalkSource(playerIndex);
+
+            if (source != null)
+            {
+                source.Stop();
+            }
+        }
+
+        /// <summary>全員の声を止める。画面を閉じるときに使う。</summary>
+        public void StopAllTalk()
+        {
+            if (_talkSources == null)
+            {
+                return;
+            }
+
+            for (var i = 0; i < _talkSources.Length; i++)
+            {
+                StopTalk(i);
+            }
+        }
+
+        /// <summary>
+        /// フェーダーの向きに合わせて、CPU ごとの話し声の音量を決める。
+        /// 正面（amount が 0）ならどちらも同じ音量で、向き切る（amount が 1）ほど
+        /// 向いた相手は大きく、反対側の相手は小さくなる。
+        /// </summary>
+        /// <param name="facingIndex">フェーダーが向いている相手。</param>
+        /// <param name="amount">向き具合。0 が正面、1 で向き切っている。</param>
+        public void SetTalkVolumes(int facingIndex, float amount)
+        {
+            if (_talkSources == null)
+            {
+                return;
+            }
+
+            var rate = Mathf.Clamp01(amount);
+
+            for (var i = 0; i < _talkSources.Length; i++)
+            {
+                var source = _talkSources[i];
+
+                if (source == null)
+                {
+                    continue;
+                }
+
+                var facingVolume = i == facingIndex ? _talkFacingVolume : _talkAwayVolume;
+                source.volume = Mathf.Lerp(_talkCenterVolume, facingVolume, rate);
+            }
+        }
+
+        /// <summary>
+        /// その CPU に拍手があと何回必要かのデバッグ表示。空文字を渡すと消える。
+        /// </summary>
+        public void SetClapChallengeText(int playerIndex, string text)
+        {
+            var label = GetClapChallengeLabel(playerIndex);
+
+            if (label == null)
+            {
+                return;
+            }
+
+            label.text = text;
+            label.gameObject.SetActive(!string.IsNullOrEmpty(text));
+        }
+
+        /// <summary>すべてのデバッグ表示を消す。</summary>
+        public void ClearClapChallengeTexts()
+        {
+            if (_clapChallengeLabels == null)
+            {
+                return;
+            }
+
+            for (var i = 0; i < _clapChallengeLabels.Length; i++)
+            {
+                SetClapChallengeText(i, string.Empty);
+            }
+        }
+
+        private AudioSource GetTalkSource(int playerIndex)
+        {
+            if (_talkSources == null || playerIndex < 0 || playerIndex >= _talkSources.Length)
+            {
+                return null;
+            }
+
+            return _talkSources[playerIndex];
+        }
+
+        private TextMeshProUGUI GetClapChallengeLabel(int playerIndex)
+        {
+            if (_clapChallengeLabels == null || playerIndex < 0 || playerIndex >= _clapChallengeLabels.Length)
+            {
+                return null;
+            }
+
+            return _clapChallengeLabels[playerIndex];
+        }
+
+        private AudioClip GetTalkClip(CpuTalkLine line)
+        {
+            switch (line)
+            {
+                case CpuTalkLine.Talk1:
+                    return _talk1Clip;
+
+                case CpuTalkLine.Talk2:
+                    return _talk2Clip;
+
+                case CpuTalkLine.Talk3:
+                    return _talk3Clip;
+
+                case CpuTalkLine.Finish1:
+                    return _talkFinish1Clip;
+
+                case CpuTalkLine.Finish2:
+                    return _talkFinish2Clip;
+
+                default:
+                    return null;
+            }
+        }
 
         /// <summary>CUE ボタンで拍手する手が表示中か。</summary>
         public bool IsClapHandsVisible => _clapHandsView != null && _clapHandsView.IsVisible;
@@ -390,6 +611,26 @@ namespace MixVerse.Game
         /// </summary>
         public void SetCameraFacing(int targetIndex, float amount)
         {
+            _facingTargetIndex = targetIndex;
+            _facingAmount = Mathf.Clamp01(amount);
+
+            ApplyCameraRotation();
+        }
+
+        /// <summary>
+        /// フェーダーで向いた先を基準に、カメラを少し下へ傾けて頷きを表す。false なら元の向きへ戻す。
+        /// ツマミは1ステップずつ細かく届くため、傾き自体は Update で時間をかけて追従させる。
+        /// </summary>
+        public void SetCameraNodding(bool isNodding)
+        {
+            _nodTargetAmount = isNodding ? 1f : 0f;
+        }
+
+        /// <summary>
+        /// フェーダーの向きに頷きの傾きを重ねて、カメラへ反映する。
+        /// </summary>
+        private void ApplyCameraRotation()
+        {
             var boardCamera = BoardCamera;
 
             if (boardCamera == null)
@@ -398,11 +639,17 @@ namespace MixVerse.Game
             }
 
             var home = GetCameraHomeRotation();
-            var point = GetFacingCameraPoint(targetIndex);
+            var point = GetFacingCameraPoint(_facingTargetIndex);
 
-            boardCamera.transform.rotation = point == null
+            var facing = point == null
                 ? home
-                : Quaternion.Slerp(home, point.rotation, Mathf.Clamp01(amount));
+                : Quaternion.Slerp(home, point.rotation, _facingAmount);
+
+            // 頷きは向いた先を基準にしたいので、カメラのローカル X 軸まわりで下へ傾ける。
+            // 動き出しと止まり際をなめらかにしたいので、傾き具合は SmoothStep で均す
+            var pitch = _nodPitchAngle * Mathf.SmoothStep(0f, 1f, _nodAmount);
+
+            boardCamera.transform.rotation = facing * Quaternion.Euler(pitch, 0f, 0f);
         }
 
         /// <summary>
