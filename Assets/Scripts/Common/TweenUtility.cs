@@ -5,6 +5,24 @@ using UnityEngine;
 namespace MixVerse
 {
     /// <summary>
+    /// 補間のかかり方。
+    /// </summary>
+    public enum TweenEase
+    {
+        /// <summary>始めと終わりが緩やか。</summary>
+        SmoothStep,
+
+        /// <summary>等速。</summary>
+        Linear,
+
+        /// <summary>止まった状態から加速していく。素早く抜けていく動きに使う。</summary>
+        AccelerateIn,
+
+        /// <summary>速い状態から減速して止まる。素早く飛び込んでくる動きに使う。</summary>
+        DecelerateOut,
+    }
+
+    /// <summary>
     /// トゥイーンライブラリを導入していないため、HomeView と同じ
     /// 「手書きの Lerp ループ + UniTask.Yield」方式を共通化したもの。
     /// </summary>
@@ -13,12 +31,26 @@ namespace MixVerse
         /// <summary>
         /// Transform をワールド座標で移動させる。
         /// </summary>
-        public static async UniTask MoveAsync(
+        public static UniTask MoveAsync(
             Transform target,
             Vector3 toPosition,
             float duration,
             CancellationToken token,
             bool useSmoothStep = true)
+            => MoveAsync(
+                target, toPosition, duration,
+                useSmoothStep ? TweenEase.SmoothStep : TweenEase.Linear,
+                token);
+
+        /// <summary>
+        /// Transform をワールド座標で移動させる。加速・減速のかかり方を選ぶ版。
+        /// </summary>
+        public static async UniTask MoveAsync(
+            Transform target,
+            Vector3 toPosition,
+            float duration,
+            TweenEase ease,
+            CancellationToken token)
         {
             if (target == null)
             {
@@ -27,11 +59,15 @@ namespace MixVerse
 
             var fromPosition = target.position;
 
-            await RunAsync(duration, token, t =>
+            var completed = await RunAsync(target, duration, token, t =>
             {
-                var rate = useSmoothStep ? Mathf.SmoothStep(0f, 1f, t) : t;
-                target.position = Vector3.LerpUnclamped(fromPosition, toPosition, rate);
+                target.position = Vector3.LerpUnclamped(fromPosition, toPosition, Evaluate(ease, t));
             });
+
+            if (!completed)
+            {
+                return;
+            }
 
             target.position = toPosition;
         }
@@ -55,14 +91,51 @@ namespace MixVerse
             var fromPosition = target.position;
             var fromRotation = target.rotation;
 
-            await RunAsync(duration, token, t =>
+            var completed = await RunAsync(target, duration, token, t =>
             {
                 var rate = useSmoothStep ? Mathf.SmoothStep(0f, 1f, t) : t;
                 target.position = Vector3.LerpUnclamped(fromPosition, toPosition, rate);
                 target.rotation = Quaternion.SlerpUnclamped(fromRotation, toRotation, rate);
             });
 
+            if (!completed)
+            {
+                return;
+            }
+
             target.position = toPosition;
+            target.rotation = toRotation;
+        }
+
+        /// <summary>
+        /// Transform の位置は変えずに、向きだけをワールド回転で変える。
+        /// カメラの位置を固定したまま向きだけ調整する演出に使う。
+        /// </summary>
+        public static async UniTask RotateAsync(
+            Transform target,
+            Quaternion toRotation,
+            float duration,
+            CancellationToken token,
+            bool useSmoothStep = true)
+        {
+            if (target == null)
+            {
+                return;
+            }
+
+            var fromRotation = target.rotation;
+
+            var completed = await RunAsync(target, duration, token, t =>
+            {
+                var rate = useSmoothStep ? Mathf.SmoothStep(0f, 1f, t) : t;
+                target.rotation = Quaternion.SlerpUnclamped(fromRotation, toRotation, rate);
+            });
+
+            if (!completed)
+            {
+                return;
+            }
+
             target.rotation = toRotation;
         }
 
@@ -85,12 +158,17 @@ namespace MixVerse
             var fromPosition = target.localPosition;
             var fromRotation = target.localRotation;
 
-            await RunAsync(duration, token, t =>
+            var completed = await RunAsync(target, duration, token, t =>
             {
                 var rate = useSmoothStep ? Mathf.SmoothStep(0f, 1f, t) : t;
                 target.localPosition = Vector3.LerpUnclamped(fromPosition, toLocalPosition, rate);
                 target.localRotation = Quaternion.SlerpUnclamped(fromRotation, toLocalRotation, rate);
             });
+
+            if (!completed)
+            {
+                return;
+            }
 
             target.localPosition = toLocalPosition;
             target.localRotation = toLocalRotation;
@@ -123,7 +201,7 @@ namespace MixVerse
             var fromPosition = target.localPosition;
             var fromRotation = target.localRotation;
 
-            await RunAsync(duration, token, t =>
+            var completed = await RunAsync(target, duration, token, t =>
             {
                 // 放られたものは初速が速く、落ちるにつれて水平方向の勢いが落ちる。
                 // 左右対称の SmoothStep ではなく、減速のみのイージングにする。
@@ -141,6 +219,11 @@ namespace MixVerse
                 var wobble = Quaternion.Euler(spinDegrees * Mathf.Sin(t * Mathf.PI), 0f, 0f);
                 target.localRotation = Quaternion.SlerpUnclamped(fromRotation, toLocalRotation, eased) * wobble;
             });
+
+            if (!completed)
+            {
+                return;
+            }
 
             target.localPosition = toLocalPosition;
             target.localRotation = toLocalRotation;
@@ -163,7 +246,12 @@ namespace MixVerse
 
             canvasGroup.alpha = from;
 
-            await RunAsync(duration, token, t => canvasGroup.alpha = Mathf.Lerp(from, to, t));
+            var completed = await RunAsync(canvasGroup, duration, token, t => canvasGroup.alpha = Mathf.Lerp(from, to, t));
+
+            if (!completed)
+            {
+                return;
+            }
 
             canvasGroup.alpha = to;
         }
@@ -188,6 +276,69 @@ namespace MixVerse
         /// </summary>
         public static UniTask WaitAsync(float seconds, CancellationToken token)
             => UniTask.Delay(Mathf.RoundToInt(seconds * 1000f), DelayType.DeltaTime, PlayerLoopTiming.Update, token);
+
+        /// <summary>
+        /// 0→1 の進捗にイージングをかける。
+        /// </summary>
+        private static float Evaluate(TweenEase ease, float t)
+        {
+            switch (ease)
+            {
+                case TweenEase.Linear:
+                    return t;
+
+                case TweenEase.AccelerateIn:
+                    return t * t;
+
+                case TweenEase.DecelerateOut:
+                    return 1f - ((1f - t) * (1f - t));
+
+                default:
+                    return Mathf.SmoothStep(0f, 1f, t);
+            }
+        }
+
+        /// <summary>
+        /// 動かす対象を見張りながら 0→1 の進捗を毎フレーム渡す。
+        /// 対象が途中で破棄されたら（次の対局の準備でカードが Destroy される場合など）
+        /// そこで打ち切り、false を返す。破棄されたオブジェクトに触れて
+        /// MissingReferenceException を投げると、それを await している対局進行ごと止まってしまう。
+        /// </summary>
+        /// <returns>最後まで進んだなら true。途中で対象が消えたなら false。</returns>
+        private static async UniTask<bool> RunAsync(
+            UnityEngine.Object target,
+            float duration,
+            CancellationToken token,
+            System.Action<float> onUpdate)
+        {
+            if (target == null)
+            {
+                return false;
+            }
+
+            if (duration <= 0f)
+            {
+                onUpdate(1f);
+                return true;
+            }
+
+            var elapsedTime = 0f;
+
+            while (elapsedTime < duration)
+            {
+                elapsedTime += Time.deltaTime;
+                onUpdate(Mathf.Clamp01(elapsedTime / duration));
+                await UniTask.Yield(PlayerLoopTiming.Update, token);
+
+                // Destroy はフレーム終わりに効くので、再開した次のフレームの頭で見る
+                if (target == null)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
 
         /// <summary>
         /// 0→1 の進捗を毎フレーム渡す共通ループ。
