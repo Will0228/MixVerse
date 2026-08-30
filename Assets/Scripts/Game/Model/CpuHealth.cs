@@ -25,6 +25,9 @@ namespace MixVerse.Game.Model
         /// <summary>トーク中の相槌（頷き）を返してもらえなかったときのダメージ。ばらつきは付けない。</summary>
         public const int NodFailureDamage = 20;
 
+        /// <summary>求められていないのに頷きすぎて怒らせ、会話を強制的に打ち切られたときのダメージ。ばらつきは付けない。</summary>
+        public const int AngryNodDamage = 20;
+
         private const double MinDamageRate = 0.5;
         private const double MaxDamageRate = 1.5;
 

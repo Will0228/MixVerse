@@ -49,6 +49,7 @@ namespace MixVerse.Game
         [SerializeField] private AudioClip _talk3Clip;
         [SerializeField] private AudioClip _talkFinish1Clip;
         [SerializeField] private AudioClip _talkFinish2Clip;
+        [SerializeField] private AudioClip _talkAngryClip;
 
         [Header("Hud")]
         [SerializeField] private CanvasGroup _canvasGroup;
@@ -592,6 +593,9 @@ namespace MixVerse.Game
 
                 case CpuTalkLine.Finish2:
                     return _talkFinish2Clip;
+
+                case CpuTalkLine.Angry:
+                    return _talkAngryClip;
 
                 default:
                     return null;

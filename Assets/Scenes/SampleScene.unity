@@ -1287,6 +1287,10 @@ PrefabInstance:
       value: 
       objectReference: {fileID: 330585545}
     - target: {fileID: 6243119364051274654, guid: 9dbbff6021d931c4d963d6947e5b37fc, type: 3}
+      propertyPath: _talkAngryClip
+      value: 
+      objectReference: {fileID: 8300000, guid: 1f6567fa12e7f084c8e8b87e5d828424, type: 3}
+    - target: {fileID: 6243119364051274654, guid: 9dbbff6021d931c4d963d6947e5b37fc, type: 3}
       propertyPath: _characterMorphs.Array.size
       value: 3
       objectReference: {fileID: 0}
@@ -2367,6 +2371,9 @@ MonoBehaviour:
   _rightCursorVerticalControlNumber: 32
   _rightCursorHorizontalControlNumber: 31
   _cursorClockwiseRawValue: 1
+  _leftNodControlNumber: 25
+  _rightNodControlNumber: 24
+  _nodResetRawValue: 1
   _logToConsole: 0
 --- !u!4 &1887734484
 Transform:

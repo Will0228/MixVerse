@@ -1,3 +1,4 @@
+using System;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 using MixVerse.Game.Model;
@@ -30,13 +31,16 @@ namespace MixVerse.Game
         private const float TalkResultDuration = 1.5f;
 
         /// <summary>締め以外のトーク（talk_1〜3）が終わる何秒前から頷きを受け付け始めるか。</summary>
-        private const float NodCheckLeadSeconds = 1f;
+        private const float NodCheckLeadSeconds = 2f;
 
         /// <summary>締め以外のトーク（talk_1〜3）が終わってから、さらに何秒だけ頷きの猶予を延ばすか。</summary>
-        private const float NodCheckTrailSeconds = 1f;
+        private const float NodCheckTrailSeconds = 2f;
 
-        /// <summary>頷きの猶予（前後合わせて2秒）のうちにそろえる必要のある頷きの回数。</summary>
+        /// <summary>頷きの猶予（前後合わせて4秒）のうちにそろえる必要のある頷きの回数。</summary>
         private const int RequiredNodCount = 3;
+
+        /// <summary>求められていないのに頷いた回数がこれに達すると、怒って会話を打ち切る。</summary>
+        private const int RequiredAngryNodCount = 3;
 
         /// <summary>どちらも向き切っていないことを表す番兵。</summary>
         private const int NoFacingPlayer = -1;
@@ -80,6 +84,25 @@ namespace MixVerse.Game
         /// トークの音源ごとに <see cref="WaitLineAndCheckNodAsync"/> の先頭で 0 に戻す。
         /// </summary>
         private readonly int[] _nodCounts = new int[OldMaidGame.DefaultPlayerCount];
+
+        /// <summary>
+        /// 頷きを求めていないタイミングで頷かれた回数。手札と同じ並び（0 がプレイヤー）で、プレイヤーの枠は使わない。
+        /// 会話（<see cref="RunCpuTalkAsync"/> の1回）ごとに 0 に戻す。
+        /// </summary>
+        private readonly int[] _angryNodCounts = new int[OldMaidGame.DefaultPlayerCount];
+
+        /// <summary>
+        /// いま頷きを受け付けている（<see cref="WaitLineAndCheckNodAsync"/> の判定窓が開いている）か。
+        /// 手札と同じ並び（0 がプレイヤー）で、プレイヤーの枠は使わない。
+        /// これが false のときの頷きは <see cref="_angryNodCounts"/> に積む。
+        /// </summary>
+        private readonly bool[] _isNodCheckOpen = new bool[OldMaidGame.DefaultPlayerCount];
+
+        /// <summary>
+        /// いま進行中の会話を、頷きすぎで強制的に打ち切るためのキャンセル元。
+        /// 手札と同じ並び（0 がプレイヤー）で、プレイヤーの枠は使わない。話していない間は null。
+        /// </summary>
+        private readonly CancellationTokenSource[] _activeTalkAngerCts = new CancellationTokenSource[OldMaidGame.DefaultPlayerCount];
 
         /// <summary>
         /// CPU ごとの拍手判定。手札と同じ並び（0 がプレイヤー）で、プレイヤーの枠は使わない。
@@ -173,7 +196,7 @@ namespace MixVerse.Game
                     // 戻した状態から頷いた瞬間だけを1回として数える。頷いたまま値が揺れても増えない。
                     if (nodStep.IsNodding && !_isNoddingTowards[deckPlayerIndex])
                     {
-                        _nodCounts[deckPlayerIndex]++;
+                        RegisterNod(deckPlayerIndex);
                     }
 
                     _isNoddingTowards[deckPlayerIndex] = nodStep.IsNodding;
@@ -453,11 +476,18 @@ namespace MixVerse.Game
 
         /// <summary>
         /// 1人ぶんのトーク。音源を順に流し、締めの1本に合わせて拍手を求める。
+        /// 求められていないのに頷きすぎると、その場で怒って会話ごと打ち切られる。
         /// </summary>
         private async UniTask RunCpuTalkAsync(int playerIndex, CancellationToken token)
         {
             var lines = _talkScript.CreateSequence(_talkRandom);
             var challenge = _clapChallenges[playerIndex];
+
+            // 怒りによる強制終了は、この会話の中だけを打ち切りたいので、
+            // 外側の token とは別につないだ CancellationTokenSource を使う。
+            _angryNodCounts[playerIndex] = 0;
+            using var angerCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+            _activeTalkAngerCts[playerIndex] = angerCts;
 
             try
             {
@@ -468,19 +498,20 @@ namespace MixVerse.Game
                 for (var i = 0; i < lines.Count - 1; i++)
                 {
                     var lineLength = _view.PlayTalkLine(playerIndex, lines[i]);
-                    var nodded = await WaitLineAndCheckNodAsync(playerIndex, lineLength, token);
+                    var nodded = await WaitLineAndCheckNodAsync(playerIndex, lineLength, angerCts.Token);
 
                     if (nodded)
                     {
                         continue;
                     }
 
-                    _view.SetClapChallengeText(
+                    // 猶予のうちにそろえられなかったときも、怒らせたときと同じ演出（talk_angry）で終える
+                    await PlayAngryEndingAsync(
                         playerIndex,
-                        "No nod... " + GetPlayerName(playerIndex) + " -" + CpuHealth.NodFailureDamage + " HP");
+                        "No nod... " + GetPlayerName(playerIndex) + " got angry!",
+                        CpuHealth.NodFailureDamage,
+                        angerCts.Token);
 
-                    ApplyCpuFixedDamage(playerIndex, CpuHealth.NodFailureDamage, token);
-                    await _view.WaitAsync(TalkResultDuration, token);
                     return;
                 }
 
@@ -488,7 +519,7 @@ namespace MixVerse.Game
                 var finishLength = _view.PlayTalkLine(playerIndex, lines[lines.Count - 1]);
                 challenge.Begin(Time.time + finishLength);
 
-                var succeeded = await WaitForClapAsync(playerIndex, token);
+                var succeeded = await WaitForClapAsync(playerIndex, angerCts.Token);
 
                 if (succeeded)
                 {
@@ -500,18 +531,48 @@ namespace MixVerse.Game
                         playerIndex,
                         "Too quiet... " + GetPlayerName(playerIndex) + " -" + CpuHealth.ClapFailureDamage + " HP");
 
-                    ApplyCpuFixedDamage(playerIndex, CpuHealth.ClapFailureDamage, token);
+                    ApplyCpuFixedDamage(playerIndex, CpuHealth.ClapFailureDamage, angerCts.Token);
                 }
 
-                await _view.WaitAsync(TalkResultDuration, token);
+                await _view.WaitAsync(TalkResultDuration, angerCts.Token);
+            }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            {
+                // ここに来るのは画面遷移などの外部中断ではなく、頷きすぎで angerCts 側だけを
+                // キャンセルしたとき。以降は外側の token で、怒りの音源とダメージを最後まで見せる。
+                await PlayAngryEndingAsync(
+                    playerIndex,
+                    GetPlayerName(playerIndex) + " got angry!",
+                    CpuHealth.AngryNodDamage,
+                    token);
             }
             finally
             {
                 // 中断されても、拍手を数えっぱなしにしたり表示を残したりしない
+                _activeTalkAngerCts[playerIndex] = null;
+                _isNodCheckOpen[playerIndex] = false;
                 challenge.End();
                 _view.SetClapChallengeText(playerIndex, string.Empty);
                 _view.StopTalk(playerIndex);
             }
+        }
+
+        /// <summary>
+        /// 会話を怒って打ち切るときの演出。再生中の声を止めて talk_angry を鳴らし、
+        /// 理由を表示してダメージを与え、その音源が鳴り終わるまで待つ。
+        /// 頷きが足りなかったときと、求められていないのに頷きすぎたときの両方から呼ぶ。
+        /// </summary>
+        private async UniTask PlayAngryEndingAsync(int playerIndex, string reasonText, int damageAmount, CancellationToken token)
+        {
+            _view.StopTalk(playerIndex);
+
+            var angryLength = _view.PlayTalkLine(playerIndex, CpuTalkLine.Angry);
+
+            _view.SetClapChallengeText(playerIndex, reasonText + " -" + damageAmount + " HP");
+
+            ApplyCpuFixedDamage(playerIndex, damageAmount, token);
+
+            await _view.WaitAsync(Mathf.Max(angryLength, TalkResultDuration), token);
         }
 
         /// <summary>
@@ -533,8 +594,17 @@ namespace MixVerse.Game
 
             // ここまでに数えていた分は今回の判定に含めない
             _nodCounts[playerIndex] = 0;
+            _isNodCheckOpen[playerIndex] = true;
 
-            return await PollNodCountAsync(playerIndex, leadCheckDuration + NodCheckTrailSeconds, token);
+            try
+            {
+                return await PollNodCountAsync(playerIndex, leadCheckDuration + NodCheckTrailSeconds, token);
+            }
+            finally
+            {
+                // 中断されても、窓を開けっぱなしにしてこの先の頷きまで拾ってしまわないようにする
+                _isNodCheckOpen[playerIndex] = false;
+            }
         }
 
         /// <summary>
@@ -584,6 +654,27 @@ namespace MixVerse.Game
                     + " (" + challenge.GetRemainingSeconds(Time.time).ToString("0.0") + "s)");
 
                 await UniTask.Yield(PlayerLoopTiming.Update, token);
+            }
+        }
+
+        /// <summary>
+        /// 頷きを1回として数える。求めている最中（判定窓が開いている間）ならその回数に積み、
+        /// 求めていないのに頷いたのなら「怒らせた回数」に積む。
+        /// 後者が既定回数に達したら、進行中の会話をその場で強制的に打ち切る。
+        /// </summary>
+        private void RegisterNod(int playerIndex)
+        {
+            if (_isNodCheckOpen[playerIndex])
+            {
+                _nodCounts[playerIndex]++;
+                return;
+            }
+
+            _angryNodCounts[playerIndex]++;
+
+            if (_angryNodCounts[playerIndex] >= RequiredAngryNodCount)
+            {
+                _activeTalkAngerCts[playerIndex]?.Cancel();
             }
         }
 
