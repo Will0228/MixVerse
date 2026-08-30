@@ -73,4 +73,7 @@ crashlytics-build.properties
 /[Aa]ssets/SimpleAnimation-master
 /[Aa]ssets/Packages
 /[Aa]ssets/TextMesh Pro
+# Asset Store の有料アセット。各自が自分のアカウントから同じ版を import する
+/[Aa]ssets/HIVEMIND
+/[Aa]ssets/HIVEMIND.meta
 /Packages/nuget-packages/InstalledPackages*
