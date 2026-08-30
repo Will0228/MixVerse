@@ -132,7 +132,10 @@ namespace MixVerse.Game
             _djController = djController;
         }
 
-        public bool IsGameOver => _game.IsGameOver;
+        /// <summary>
+        /// 通常のババ抜き決着（残り1人）に加えて、CPU がどちらか一方でも体力が尽きた場合も決着とする。
+        /// </summary>
+        public bool IsGameOver => _game.IsGameOver || IsAnyCpuDepleted();
 
         public bool IsHumanTurn => _game.CurrentPlayerIndex == HumanPlayerIndex;
 
@@ -383,14 +386,17 @@ namespace MixVerse.Game
 
         /// <summary>
         /// CPU の体力を減らす。体力が初めて減った CPU は、グリッチで乱れながら別のキャラクターへ変わる。
+        /// このダメージでちょうど体力が尽きた CPU は、さらに KO 演出で舞い上がる。
         /// </summary>
         private void ApplyCpuDamage(int playerIndex, int damageBase, CancellationToken token)
         {
             var wasDamaged = _cpuHealth.IsDamaged(playerIndex);
+            var wasDepleted = _cpuHealth.IsDepleted(playerIndex);
 
             _cpuHealth.ApplyDamage(playerIndex, damageBase, _random);
 
             PlayFirstDamageMorph(playerIndex, wasDamaged, token);
+            PlayKnockOutIfJustDepleted(playerIndex, wasDepleted, token);
         }
 
         /// <summary>
@@ -399,10 +405,12 @@ namespace MixVerse.Game
         private void ApplyCpuFixedDamage(int playerIndex, int amount, CancellationToken token)
         {
             var wasDamaged = _cpuHealth.IsDamaged(playerIndex);
+            var wasDepleted = _cpuHealth.IsDepleted(playerIndex);
 
             _cpuHealth.ApplyFixedDamage(playerIndex, amount);
 
             PlayFirstDamageMorph(playerIndex, wasDamaged, token);
+            PlayKnockOutIfJustDepleted(playerIndex, wasDepleted, token);
         }
 
         /// <summary>
@@ -414,6 +422,18 @@ namespace MixVerse.Game
             if (!wasDamaged)
             {
                 _view.PlayCharacterMorphAsync(playerIndex, token).Forget();
+            }
+        }
+
+        /// <summary>
+        /// このダメージでちょうど体力が尽きた CPU だけ KO 演出を出す。
+        /// 決着後もホーム画面へ戻るまで回り続けさせたいので、待たずに投げっぱなしにする。
+        /// </summary>
+        private void PlayKnockOutIfJustDepleted(int playerIndex, bool wasDepleted, CancellationToken token)
+        {
+            if (!wasDepleted && _cpuHealth.IsDepleted(playerIndex))
+            {
+                _view.PlayCpuKnockOutAsync(playerIndex, token).Forget();
             }
         }
 
@@ -446,14 +466,14 @@ namespace MixVerse.Game
         /// </summary>
         private async UniTask RunCpuTalkLoopAsync(int playerIndex, CancellationToken token)
         {
-            while (!_game.IsGameOver)
+            while (!IsGameOver)
             {
                 await _view.WaitAsync(TalkIntervalDuration, token);
 
                 // 決着した・上がった・体力が尽きた CPU は話さない。
                 // プレイヤーがカードを狙っている最中も、照準を出している間は CUE を受け付けず
                 // 拍手のしようがないので見送る。
-                if (_game.IsGameOver
+                if (IsGameOver
                     || _game.IsFinished(playerIndex)
                     || _cpuHealth.IsDepleted(playerIndex)
                     || _view.IsDrawSelectionActive)
@@ -724,16 +744,69 @@ namespace MixVerse.Game
 
         /// <summary>
         /// 決着の表示。
+        /// CPU をどちらか一方でも先に KO すればプレイヤーの勝ち。
+        /// それ以外は、通常のババ抜き決着どおりプレイヤーが最後まで手札を持ち続けていれば負け。
         /// </summary>
-        public void ShowResult()
+        public void ShowResult(CancellationToken token)
         {
             _view.ClearSelectable();
             _view.HideArrow();
             _view.SetTurnText(string.Empty);
 
-            var loser = _game.LoserIndex;
-            var resultText = loser == HumanPlayerIndex ? "You lose..." : GetPlayerName(loser) + " loses!";
+            var userLoses = !IsAnyCpuDepleted() && _game.LoserIndex == HumanPlayerIndex;
+            var resultText = userLoses ? "You lose..." : "You win!";
             _view.ShowResult(resultText + "\nReturning to home in 5 seconds...");
+
+            PlayKnockOutIfCpuIsLastRemaining(token);
+        }
+
+        /// <summary>
+        /// 体力切れではなく、通常のババ抜き決着（最後までジョーカーを持ち続けた）で負けたのが
+        /// CPU だった場合も、体力切れのときと同じ KO 演出を出す。
+        /// すでに体力切れで KO 済みの CPU には、演出が二重に走らないよう出さない。
+        /// </summary>
+        private void PlayKnockOutIfCpuIsLastRemaining(CancellationToken token)
+        {
+            if (!_game.IsGameOver)
+            {
+                return;
+            }
+
+            var loserIndex = _game.LoserIndex;
+
+            if (loserIndex == HumanPlayerIndex || _cpuHealth.IsDepleted(loserIndex))
+            {
+                return;
+            }
+
+            _view.PlayCpuKnockOutAsync(loserIndex, token).Forget();
+        }
+
+        /// <summary>
+        /// CPU（プレイヤー本人以外）のうち、体力が尽きている者が1人でもいるか。
+        /// 対局開始前（体力が未初期化）は false。
+        /// </summary>
+        private bool IsAnyCpuDepleted()
+        {
+            if (_game.PlayerCount <= 1)
+            {
+                return false;
+            }
+
+            for (var playerIndex = 0; playerIndex < _game.PlayerCount; playerIndex++)
+            {
+                if (playerIndex == HumanPlayerIndex)
+                {
+                    continue;
+                }
+
+                if (_cpuHealth.IsDepleted(playerIndex))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         /// <summary>

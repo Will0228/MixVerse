@@ -88,6 +88,25 @@ namespace MixVerse.Game
         [Tooltip("頷いて下を向く／元に戻るのにかける時間（秒）。")]
         [SerializeField] private float _nodDuration = 0.15f;
 
+        [Header("Knock Out")]
+        [Tooltip("体力が尽きた CPU が舞い上がる高さ。")]
+        [SerializeField] private float _knockOutRiseHeight = 3f;
+
+        [Tooltip("舞い上がるのにかける時間（秒）。")]
+        [SerializeField] private float _knockOutRiseDuration = 0.5f;
+
+        [Tooltip("舞い上がった後、落下先へ急降下するのにかける時間（秒）。")]
+        [SerializeField] private float _knockOutFallDuration = 0.4f;
+
+        [Tooltip("急降下する先。CPU 同士で同じ場所を指してよい。")]
+        [SerializeField] private Transform _knockOutLandingPoint;
+
+        [Tooltip("舞い上がっている間・落下先に着いてからも回り続ける速さ（度/秒）。")]
+        [SerializeField] private float _knockOutSpinSpeed = 480f;
+
+        [Tooltip("回転させる軸。ワールド基準。")]
+        [SerializeField] private Vector3 _knockOutSpinAxis = Vector3.right;
+
         private readonly Subject<CardView> _onCardClicked = new Subject<CardView>();
         private readonly CompositeDisposable _cardSubscriptions = new CompositeDisposable();
         private readonly List<CardView> _spawnedCards = new List<CardView>();
@@ -114,12 +133,22 @@ namespace MixVerse.Game
         /// <summary>捨て札置き場に積まれた枚数。積み上げる高さの計算に使う。</summary>
         private int _discardStackCount;
 
+        // KO 演出で吹き飛ばしたキャラクターを次の対局で元の位置へ戻すための、変身前の localPosition / localRotation。
+        // _characterMorphs と同じ並び。Awake の時点（まだ誰も KO していない）で控えておく。
+        private Vector3[] _characterMorphHomeLocalPosition;
+        private Quaternion[] _characterMorphHomeLocalRotation;
+
         /// <summary>引く対象のカードがクリックされた。</summary>
         public Observable<CardView> OnCardClicked => _onCardClicked;
 
         public int HandCount => _handViews.Length;
 
         private Camera BoardCamera => _boardCamera != null ? _boardCamera : Camera.main;
+
+        private void Awake()
+        {
+            CacheCharacterMorphHomeTransforms();
+        }
 
         /// <summary>
         /// 頷きの傾きを毎フレーム目標へ近づける。
@@ -715,7 +744,58 @@ namespace MixVerse.Game
         }
 
         /// <summary>
-        /// 変身したキャラクターを変身前の状態へ戻す。次の対局を同じ見た目で始めるために使う。
+        /// 体力が尽きた CPU を、回転させながら舞い上げてから落下先へ急降下させる。
+        /// 着地してもホーム画面へ戻る（次の対局の準備で位置が戻る）まで回転し続ける。
+        /// 落下先が未設定なら何もしない。
+        /// </summary>
+        public async UniTask PlayCpuKnockOutAsync(int playerIndex, CancellationToken token)
+        {
+            var morph = GetCharacterMorph(playerIndex);
+
+            if (morph == null || _knockOutLandingPoint == null)
+            {
+                return;
+            }
+
+            var t = morph.transform;
+            var risePosition = t.position + (Vector3.up * _knockOutRiseHeight);
+
+            await UniTask.WhenAll(
+                TweenUtility.MoveAsync(t, risePosition, _knockOutRiseDuration, TweenEase.DecelerateOut, token),
+                SpinCharacterAsync(t, _knockOutRiseDuration, token));
+
+            await UniTask.WhenAll(
+                TweenUtility.MoveAsync(t, _knockOutLandingPoint.position, _knockOutFallDuration, TweenEase.AccelerateIn, token),
+                SpinCharacterAsync(t, _knockOutFallDuration, token));
+
+            await SpinCharacterAsync(t, null, token);
+        }
+
+        /// <summary>
+        /// 指定した時間だけ（null ならキャンセルされるまでずっと）回転させ続ける。
+        /// </summary>
+        private async UniTask SpinCharacterAsync(Transform target, float? duration, CancellationToken token)
+        {
+            var elapsed = 0f;
+
+            while (duration == null || elapsed < duration.Value)
+            {
+                if (target == null)
+                {
+                    return;
+                }
+
+                var deltaTime = Time.deltaTime;
+                target.Rotate(_knockOutSpinAxis, _knockOutSpinSpeed * deltaTime, Space.World);
+                elapsed += deltaTime;
+
+                await UniTask.Yield(PlayerLoopTiming.Update, token);
+            }
+        }
+
+        /// <summary>
+        /// 変身したキャラクターを変身前の状態へ、KO で吹き飛ばしたキャラクターを元の位置へ戻す。
+        /// 次の対局を同じ見た目で始めるために使う。
         /// </summary>
         private void ResetCharacterMorphs()
         {
@@ -724,12 +804,48 @@ namespace MixVerse.Game
                 return;
             }
 
-            foreach (var morph in _characterMorphs)
+            for (var i = 0; i < _characterMorphs.Length; i++)
             {
-                if (morph != null)
+                var morph = _characterMorphs[i];
+
+                if (morph == null)
                 {
-                    morph.ResetToStart();
+                    continue;
                 }
+
+                morph.ResetToStart();
+
+                if (_characterMorphHomeLocalPosition != null)
+                {
+                    morph.transform.localPosition = _characterMorphHomeLocalPosition[i];
+                    morph.transform.localRotation = _characterMorphHomeLocalRotation[i];
+                }
+            }
+        }
+
+        /// <summary>
+        /// KO 演出で動かしたキャラクターを元の位置へ戻せるよう、まだ誰も KO していないこのタイミングで控えておく。
+        /// </summary>
+        private void CacheCharacterMorphHomeTransforms()
+        {
+            if (_characterMorphs == null)
+            {
+                return;
+            }
+
+            _characterMorphHomeLocalPosition = new Vector3[_characterMorphs.Length];
+            _characterMorphHomeLocalRotation = new Quaternion[_characterMorphs.Length];
+
+            for (var i = 0; i < _characterMorphs.Length; i++)
+            {
+                if (_characterMorphs[i] == null)
+                {
+                    continue;
+                }
+
+                var t = _characterMorphs[i].transform;
+                _characterMorphHomeLocalPosition[i] = t.localPosition;
+                _characterMorphHomeLocalRotation[i] = t.localRotation;
             }
         }
 

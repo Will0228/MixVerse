@@ -1275,6 +1275,12 @@ MonoBehaviour:
   _arrangeDuration: 0.2
   _drawCameraSettings: {fileID: 11400000, guid: cc0149128ea9429438c99bc3d00ceb52, type: 2}
   _defaultCameraPoint: {fileID: 5782233010111963468}
+  _knockOutRiseHeight: 3
+  _knockOutRiseDuration: 0.5
+  _knockOutFallDuration: 0.4
+  _knockOutLandingPoint: {fileID: 5184302570911611115}
+  _knockOutSpinSpeed: 480
+  _knockOutSpinAxis: {x: 1, y: 0, z: 0}
 --- !u!1 &5566778899001122
 GameObject:
   m_ObjectHideFlags: 0

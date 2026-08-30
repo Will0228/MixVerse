@@ -72,7 +72,7 @@ namespace MixVerse.Game
                     await _presenter.PlayTurnAsync(token);
                 }
 
-                _presenter.ShowResult();
+                _presenter.ShowResult(token);
 
                 await _presenter.WaitBeforeReturnToHomeAsync(token);
 
