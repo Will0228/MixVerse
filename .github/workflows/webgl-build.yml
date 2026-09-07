@@ -1,0 +1,103 @@
+name: WebGL Build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+# Addressable key の更新を master に push し返すため。
+permissions:
+  contents: write
+
+concurrency:
+  group: webgl-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # ProjectSettings/ProjectVersion.txt と合わせること。
+  UNITY_VERSION: 6000.3.23f1
+  NUGETFORUNITY_CLI_VERSION: 4.5.0
+
+jobs:
+  build:
+    name: Build WebGL
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      # Unity のイメージと WebGL の中間ファイルでランナーの空き容量が足りなくなるため。
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/share/swift
+          df -h /
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # Assets/Packages は .gitignore 済みなので、packages.config から復元する。
+      - name: Restore NuGetForUnity packages
+        run: |
+          dotnet tool install --global NuGetForUnity.Cli --version "$NUGETFORUNITY_CLI_VERSION"
+          nugetforunity restore "$GITHUB_WORKSPACE"
+
+      - name: Cache Library
+        uses: actions/cache@v4
+        with:
+          path: Library
+          key: Library-WebGL-${{ hashFiles('Packages/manifest.json', 'Assets/packages.config') }}-${{ github.sha }}
+          restore-keys: |
+            Library-WebGL-${{ hashFiles('Packages/manifest.json', 'Assets/packages.config') }}-
+            Library-WebGL-
+
+      - name: Build
+        uses: game-ci/unity-builder@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          unityVersion: ${{ env.UNITY_VERSION }}
+          targetPlatform: WebGL
+          buildName: MixVerse
+          buildsPath: build
+          buildMethod: MixVerse.CI.CIBuild.BuildWebGL
+          # 既定の Semantic は git の全履歴とタグを要求するため使わない。
+          versioning: None
+          # NuGet 復元と Addressables の生成物でワークツリーが dirty になるため。
+          allowDirtyBuild: true
+
+      # Unity はコンテナ内で root として動くので、後続の git 操作のために owner を戻す。
+      - name: Fix file ownership
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" .
+
+      - name: Commit Addressable keys
+        if: github.event_name != 'pull_request'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for path in Assets/AddressableAssetsData Assets/AddressableAssetsData.meta Packages/packages-lock.json; do
+            if [ -e "$path" ]; then git add -A -- "$path"; fi
+          done
+          if git diff --cached --quiet; then
+            echo "Addressable key に変更はありません"
+          else
+            git commit -m "CI: Addressable key を自動更新"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: MixVerse-WebGL-${{ github.sha }}
+          path: build/WebGL
+          retention-days: 14
+          if-no-files-found: error
